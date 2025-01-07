@@ -138,12 +138,14 @@
 #define FW_VER_20_101_36_2                 810
 #define FW_VER_20_82_42_r985250_sta        811
 #define FW_VER_20_101_57_r1035009          812
+#define FW_VER_20_80_87_3_r1050079_sta     813
 
 // for CHIP_VER_BCM43439a0
 #define FW_VER_7_95_49_2271bb6             910
 
 // for CHIP_VER_BCM4398d0
 #define FW_VER_24_671_6_9_r1031525        1010
+#define FW_VER_24_67101_26_10_r1048778    1011
 
 // define CHIP_VER_BCM6715b0
 #define FW_VER_17_10_188_6401_r808804_ax86upro 1020
