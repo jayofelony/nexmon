@@ -7,7 +7,6 @@
 #include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <linux/inetdevice.h>
-#include <linux/property.h>
 #include <net/cfg80211.h>
 #include <net/rtnetlink.h>
 #include <net/addrconf.h>
@@ -18,7 +17,6 @@
 
 #include "core.h"
 #include "bus.h"
-#include "fwvid.h"
 #include "debug.h"
 #include "fwil_types.h"
 #include "p2p.h"
@@ -105,7 +103,9 @@ nexmon_nl_ioctl_handler(struct sk_buff *skb)
 {
     struct nlmsghdr *nlh = (struct nlmsghdr *) skb->data;
     struct nexudp_ioctl_header *frame = (struct nexudp_ioctl_header *) nlmsg_data(nlh);
-    struct brcmf_if *ifp = netdev_priv(ndev_global);
+    /* Local snapshot to avoid a TOCTOU race with brcmf_detach() clearing ndev_global */
+    struct net_device *ndev = ndev_global;
+    struct brcmf_if *ifp;
     struct sk_buff *skb_out;
     struct nlmsghdr *nlh_tx;
 
@@ -123,8 +123,20 @@ nexmon_nl_ioctl_handler(struct sk_buff *skb)
         return;
     }
 
-     if (ifp == NULL) {
-        brcmf_err("NEXMON: %s: ifp is NULL\n", __FUNCTION__);
+     if (ndev == NULL) {
+        brcmf_err("NEXMON: %s: ndev_global is NULL, bus not ready\n", __FUNCTION__);
+        return;
+    }
+
+    ifp = netdev_priv(ndev);
+
+     if (ifp == NULL || ifp->drvr == NULL) {
+        brcmf_err("NEXMON: %s: ifp or drvr is NULL, interface torn down\n", __FUNCTION__);
+        return;
+    }
+
+     if (ifp->drvr->bus_if->state != BRCMF_BUS_UP) {
+        brcmf_err("NEXMON: %s: bus not UP (state=%d), ignoring ioctl\n", __FUNCTION__, ifp->drvr->bus_if->state);
         return;
     }
 
@@ -184,11 +196,6 @@ void brcmf_configure_arp_nd_offload(struct brcmf_if *ifp, bool enable)
 {
 	s32 err;
 	u32 mode;
-
-	if (enable && brcmf_is_apmode_operating(ifp->drvr->wiphy)) {
-		brcmf_dbg(TRACE, "Skip ARP/ND offload enable when soft AP is running\n");
-		return;
-	}
 
 	if (enable)
 		mode = BRCMF_ARP_OL_AGENT | BRCMF_ARP_OL_PEER_AUTO_REPLY;
@@ -385,7 +392,6 @@ static netdev_tx_t brcmf_netdev_start_xmit(struct sk_buff *skb,
 	struct brcmf_pub *drvr = ifp->drvr;
 	struct ethhdr *eh;
 	int head_delta;
-	unsigned int tx_bytes = skb->len;
 
 	brcmf_dbg(DATA, "Enter, bsscfgidx=%d\n", ifp->bsscfgidx);
 
@@ -419,8 +425,8 @@ static netdev_tx_t brcmf_netdev_start_xmit(struct sk_buff *skb,
 	if (skb_headroom(skb) < drvr->hdrlen || skb_header_cloned(skb)) {
 		head_delta = max_t(int, drvr->hdrlen - skb_headroom(skb), 0);
 
-		brcmf_dbg(INFO, "%s: %s headroom\n", brcmf_ifname(ifp),
-			  head_delta ? "insufficient" : "unmodifiable");
+		brcmf_dbg(INFO, "%s: insufficient headroom (%d)\n",
+			  brcmf_ifname(ifp), head_delta);
 		atomic_inc(&drvr->bus_if->stats.pktcowed);
 		ret = pskb_expand_head(skb, ALIGN(head_delta, NET_SKB_PAD), 0,
 				       GFP_ATOMIC);
@@ -428,7 +434,6 @@ static netdev_tx_t brcmf_netdev_start_xmit(struct sk_buff *skb,
 			bphy_err(drvr, "%s: failed to expand headroom\n",
 				 brcmf_ifname(ifp));
 			atomic_inc(&drvr->bus_if->stats.pktcow_failed);
-			dev_kfree_skb(skb);
 			goto done;
 		}
 	}
@@ -461,7 +466,7 @@ done:
 		ndev->stats.tx_dropped++;
 	} else {
 		ndev->stats.tx_packets++;
-		ndev->stats.tx_bytes += tx_bytes;
+		ndev->stats.tx_bytes += skb->len;
 	}
 
 	/* Return ok: we always eat the packet */
@@ -632,11 +637,6 @@ void brcmf_txfinalize(struct brcmf_if *ifp, struct sk_buff *txp, bool success)
 	struct ethhdr *eh;
 	u16 type;
 
-	if (!ifp) {
-		brcmu_pkt_buf_free_skb(txp);
-		return;
-	}
-
 	eh = (struct ethhdr *)(txp->data);
 	type = ntohs(eh->h_proto);
 
@@ -804,8 +804,19 @@ static int brcmf_net_mon_open(struct net_device *ndev)
 		bphy_err(drvr, "Monitor mode is already enabled\n");
 		return -EEXIST;
 	}
-
-	monitor = 3;
+	
+	/* NEXMON */
+	switch (ifp->ndev->type) {
+		case ARPHRD_IEEE80211_RADIOTAP:
+			monitor = 2; // RADIOTAP ENABLED MONITOR MODE
+			break;
+		case ARPHRD_IEEE80211:
+			monitor = 1; // MONITOR MODE WITHOUT RADIOTAP
+			break;
+		default:
+			monitor = 0;
+	}
+	
 	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_MONITOR, monitor);
 	if (err)
 		bphy_err(drvr, "BRCMF_C_SET_MONITOR error (%d)\n", err);
@@ -830,18 +841,10 @@ static int brcmf_net_mon_stop(struct net_device *ndev)
 	return err;
 }
 
-static netdev_tx_t brcmf_net_mon_start_xmit(struct sk_buff *skb,
-					    struct net_device *ndev)
-{
-	dev_kfree_skb_any(skb);
-
-	return NETDEV_TX_OK;
-}
-
 static const struct net_device_ops brcmf_netdev_ops_mon = {
 	.ndo_open = brcmf_net_mon_open,
 	.ndo_stop = brcmf_net_mon_stop,
-	.ndo_start_xmit = brcmf_net_mon_start_xmit,
+	.ndo_start_xmit = brcmf_netdev_start_xmit,
 };
 
 int brcmf_net_mon_attach(struct brcmf_if *ifp)
@@ -1035,6 +1038,10 @@ static void brcmf_del_if(struct brcmf_pub *drvr, s32 bsscfgidx,
 			cancel_work_sync(&ifp->multicast_work);
 			cancel_work_sync(&ifp->ndoffload_work);
 		}
+
+		if (ifp->ndev == ndev_global)
+			ndev_global = NULL;
+
 		brcmf_net_detach(ifp->ndev, locked);
 	} else {
 		/* Only p2p device interfaces which get dynamically created
@@ -1237,8 +1244,7 @@ static int brcmf_revinfo_read(struct seq_file *s, void *data)
 	seq_printf(s, "vendorid: 0x%04x\n", ri->vendorid);
 	seq_printf(s, "deviceid: 0x%04x\n", ri->deviceid);
 	seq_printf(s, "radiorev: %s\n", brcmu_dotrev_str(ri->radiorev, drev));
-	seq_printf(s, "chip: %s (%s)\n", ri->chipname,
-		   brcmf_fwvid_vendor_name(bus_if->drvr));
+	seq_printf(s, "chip: %s\n", ri->chipname);
 	seq_printf(s, "chippkg: %u\n", ri->chippkg);
 	seq_printf(s, "corerev: %u\n", ri->corerev);
 	seq_printf(s, "boardid: 0x%04x\n", ri->boardid);
@@ -1284,6 +1290,11 @@ static ssize_t bus_reset_write(struct file *file, const char __user *user_buf,
 
 static const struct file_operations bus_reset_fops = {
 	.open	= simple_open,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,2)
+	.llseek	= no_llseek,
+#else
+	.llseek	= noop_llseek,
+#endif
 	.write	= bus_reset_write,
 };
 
@@ -1297,8 +1308,7 @@ static int brcmf_bus_started(struct brcmf_pub *drvr, struct cfg80211_ops *ops)
 	brcmf_dbg(TRACE, "\n");
 
 	/* add primary networking interface */
-	ifp = brcmf_add_if(drvr, 0, 0, false, "wlan%d",
-			   is_valid_ether_addr(drvr->settings->mac) ? drvr->settings->mac : NULL);
+	ifp = brcmf_add_if(drvr, 0, 0, false, "wlan%d", NULL);
 	if (IS_ERR(ifp))
 		return PTR_ERR(ifp);
 
@@ -1434,12 +1444,6 @@ int brcmf_attach(struct device *dev)
 	/* Link to bus module */
 	drvr->hdrlen = 0;
 
-	ret = brcmf_fwvid_attach(drvr);
-	if (ret != 0) {
-		bphy_err(drvr, "brcmf_fwvid_attach failed\n");
-		goto fail;
-	}
-
 	/* Attach and link in the protocol */
 	ret = brcmf_proto_attach(drvr);
 	if (ret != 0) {
@@ -1447,18 +1451,12 @@ int brcmf_attach(struct device *dev)
 		goto fail;
 	}
 
-	/* attach firmware event handler */
-	ret = brcmf_fweh_attach(drvr);
-	if (ret != 0) {
-		bphy_err(drvr, "brcmf_fweh_attach failed\n");
-		goto fail;
-	}
-
 	/* Attach to events important for core code */
 	brcmf_fweh_register(drvr, BRCMF_E_PSM_WATCHDOG,
 			    brcmf_psm_watchdog_notify);
 
-	brcmf_fwvid_get_cfg80211_ops(drvr);
+	/* attach firmware event handler */
+	brcmf_fweh_attach(drvr);
 
 	ret = brcmf_bus_started(drvr, drvr->ops);
 	if (ret != 0) {
@@ -1513,8 +1511,7 @@ void brcmf_fw_crashed(struct device *dev)
 
 	brcmf_dev_coredump(dev);
 
-	if (drvr->bus_reset.func)
-		schedule_work(&drvr->bus_reset);
+	schedule_work(&drvr->bus_reset);
 }
 
 void brcmf_detach(struct device *dev)
@@ -1537,6 +1534,12 @@ void brcmf_detach(struct device *dev)
 #endif
 
 	brcmf_bus_change_state(bus_if, BRCMF_BUS_DOWN);
+
+	/* Clear the global pointer before removing interfaces so
+	 * nexmon_nl_ioctl_handler() cannot dereference freed memory during
+	 * the teardown/recovery window. */
+	ndev_global = NULL;
+
 	/* make sure primary interface removed last */
 	for (i = BRCMF_MAX_IFS - 1; i > -1; i--) {
 		if (drvr->iflist[i])
@@ -1557,8 +1560,6 @@ void brcmf_detach(struct device *dev)
 		brcmf_cfg80211_detach(drvr->config);
 		drvr->config = NULL;
 	}
-
-	brcmf_fwvid_detach(drvr);
 }
 
 void brcmf_free(struct device *dev)
@@ -1598,10 +1599,8 @@ int brcmf_netdev_wait_pend8021x(struct brcmf_if *ifp)
 				 !brcmf_get_pend_8021x_cnt(ifp),
 				 MAX_WAIT_FOR_8021X_TX);
 
-	if (!err) {
+	if (!err)
 		bphy_err(drvr, "Timed out waiting for no pending 802.1x packets\n");
-		atomic_set(&ifp->pend_8021x_cnt, 0);
-	}
 
 	return !err;
 }

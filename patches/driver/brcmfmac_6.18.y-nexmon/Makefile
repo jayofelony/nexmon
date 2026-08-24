@@ -21,18 +21,11 @@ brcmfmac-objs += \
 		common.o \
 		core.o \
 		firmware.o \
-		fwvid.o \
 		feature.o \
 		btcoex.o \
 		vendor.o \
 		pno.o \
-		xtlv.o \
-		bca/core.o \
-		bca/module.o \
-		cyw/core.o \
-		cyw/module.o \
-		wcc/core.o \
-		wcc/module.o
+		xtlv.o
 brcmfmac-$(CONFIG_BRCMFMAC_PROTO_BCDC) += \
 		bcdc.o \
 		fwsignal.o
@@ -55,5 +48,3 @@ brcmfmac-$(CONFIG_OF) += \
 		of.o
 brcmfmac-$(CONFIG_DMI) += \
 		dmi.o
-brcmfmac-$(CONFIG_ACPI) += \
-		acpi.o

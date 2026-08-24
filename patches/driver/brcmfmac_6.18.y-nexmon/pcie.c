@@ -4,6 +4,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/firmware.h>
 #include <linux/pci.h>
@@ -12,11 +13,12 @@
 #include <linux/interrupt.h>
 #include <linux/bcma/bcma.h>
 #include <linux/sched.h>
-#include <linux/sched/signal.h>
-#include <linux/kthread.h>
 #include <linux/io.h>
-#include <linux/random.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,2)
+#include <asm/unaligned.h>
+#else
 #include <linux/unaligned.h>
+#endif
 
 #include <soc.h>
 #include <chipcommon.h>
@@ -52,26 +54,16 @@ enum brcmf_pcie_state {
 BRCMF_FW_DEF(43602, "brcmfmac43602-pcie");
 BRCMF_FW_DEF(4350, "brcmfmac4350-pcie");
 BRCMF_FW_DEF(4350C, "brcmfmac4350c2-pcie");
-BRCMF_FW_CLM_DEF(4355, "brcmfmac4355-pcie");
-BRCMF_FW_CLM_DEF(4355C1, "brcmfmac4355c1-pcie");
 BRCMF_FW_CLM_DEF(4356, "brcmfmac4356-pcie");
 BRCMF_FW_CLM_DEF(43570, "brcmfmac43570-pcie");
 BRCMF_FW_DEF(4358, "brcmfmac4358-pcie");
 BRCMF_FW_DEF(4359, "brcmfmac4359-pcie");
-BRCMF_FW_DEF(4359C, "brcmfmac4359c-pcie");
-BRCMF_FW_CLM_DEF(4364B2, "brcmfmac4364b2-pcie");
-BRCMF_FW_CLM_DEF(4364B3, "brcmfmac4364b3-pcie");
+BRCMF_FW_DEF(4364, "brcmfmac4364-pcie");
 BRCMF_FW_DEF(4365B, "brcmfmac4365b-pcie");
 BRCMF_FW_DEF(4365C, "brcmfmac4365c-pcie");
 BRCMF_FW_DEF(4366B, "brcmfmac4366b-pcie");
 BRCMF_FW_DEF(4366C, "brcmfmac4366c-pcie");
 BRCMF_FW_DEF(4371, "brcmfmac4371-pcie");
-BRCMF_FW_CLM_DEF(43752, "brcmfmac43752-pcie");
-BRCMF_FW_CLM_DEF(4377B3, "brcmfmac4377b3-pcie");
-BRCMF_FW_CLM_DEF(4378B1, "brcmfmac4378b1-pcie");
-BRCMF_FW_CLM_DEF(4378B3, "brcmfmac4378b3-pcie");
-BRCMF_FW_CLM_DEF(4387C2, "brcmfmac4387c2-pcie");
-BRCMF_FW_CLM_DEF(54591, "brcmfmac54591-pcie");
 
 /* firmware config files */
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.txt");
@@ -79,8 +71,6 @@ MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.txt");
 
 /* per-board firmware binaries */
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.bin");
-MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.clm_blob");
-MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.txcap_blob");
 
 static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_43602_CHIP_ID, 0xFFFFFFFF, 43602),
@@ -88,18 +78,13 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_4350_CHIP_ID, 0x000000FF, 4350C),
 	BRCMF_FW_ENTRY(BRCM_CC_4350_CHIP_ID, 0xFFFFFF00, 4350),
 	BRCMF_FW_ENTRY(BRCM_CC_43525_CHIP_ID, 0xFFFFFFF0, 4365C),
-	BRCMF_FW_ENTRY(BRCM_CC_4355_CHIP_ID, 0x000007FF, 4355),
-	BRCMF_FW_ENTRY(BRCM_CC_4355_CHIP_ID, 0x00002000, 54591),
-	BRCMF_FW_ENTRY(BRCM_CC_4355_CHIP_ID, 0xFFFFF800, 4355C1), /* rev ID 12/C2 seen */
 	BRCMF_FW_ENTRY(BRCM_CC_4356_CHIP_ID, 0xFFFFFFFF, 4356),
 	BRCMF_FW_ENTRY(BRCM_CC_43567_CHIP_ID, 0xFFFFFFFF, 43570),
 	BRCMF_FW_ENTRY(BRCM_CC_43569_CHIP_ID, 0xFFFFFFFF, 43570),
 	BRCMF_FW_ENTRY(BRCM_CC_43570_CHIP_ID, 0xFFFFFFFF, 43570),
 	BRCMF_FW_ENTRY(BRCM_CC_4358_CHIP_ID, 0xFFFFFFFF, 4358),
-	BRCMF_FW_ENTRY(BRCM_CC_4359_CHIP_ID, 0x000001FF, 4359),
-	BRCMF_FW_ENTRY(BRCM_CC_4359_CHIP_ID, 0xFFFFFE00, 4359C),
-	BRCMF_FW_ENTRY(BRCM_CC_4364_CHIP_ID, 0x0000000F, 4364B2), /* 3 */
-	BRCMF_FW_ENTRY(BRCM_CC_4364_CHIP_ID, 0xFFFFFFF0, 4364B3), /* 4 */
+	BRCMF_FW_ENTRY(BRCM_CC_4359_CHIP_ID, 0xFFFFFFFF, 4359),
+	BRCMF_FW_ENTRY(BRCM_CC_4364_CHIP_ID, 0xFFFFFFFF, 4364),
 	BRCMF_FW_ENTRY(BRCM_CC_4365_CHIP_ID, 0x0000000F, 4365B),
 	BRCMF_FW_ENTRY(BRCM_CC_4365_CHIP_ID, 0xFFFFFFF0, 4365C),
 	BRCMF_FW_ENTRY(BRCM_CC_4366_CHIP_ID, 0x0000000F, 4366B),
@@ -107,11 +92,6 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_43664_CHIP_ID, 0xFFFFFFF0, 4366C),
 	BRCMF_FW_ENTRY(BRCM_CC_43666_CHIP_ID, 0xFFFFFFF0, 4366C),
 	BRCMF_FW_ENTRY(BRCM_CC_4371_CHIP_ID, 0xFFFFFFFF, 4371),
-	BRCMF_FW_ENTRY(BRCM_CC_43752_CHIP_ID, 0xFFFFFFFF, 43752),
-	BRCMF_FW_ENTRY(BRCM_CC_4377_CHIP_ID, 0xFFFFFFFF, 4377B3), /* revision ID 4 */
-	BRCMF_FW_ENTRY(BRCM_CC_4378_CHIP_ID, 0x0000000F, 4378B1), /* revision ID 3 */
-	BRCMF_FW_ENTRY(BRCM_CC_4378_CHIP_ID, 0xFFFFFFE0, 4378B3), /* revision ID 5 */
-	BRCMF_FW_ENTRY(BRCM_CC_4387_CHIP_ID, 0xFFFFFFFF, 4387C2), /* revision ID 7 */
 };
 
 #define BRCMF_PCIE_FW_UP_TIMEOUT		5000 /* msec */
@@ -143,12 +123,6 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_0	0x140
 #define BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_1	0x144
 
-#define BRCMF_PCIE_64_PCIE2REG_INTMASK		0xC14
-#define BRCMF_PCIE_64_PCIE2REG_MAILBOXINT	0xC30
-#define BRCMF_PCIE_64_PCIE2REG_MAILBOXMASK	0xC34
-#define BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_0	0xA20
-#define BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_1	0xA24
-
 #define BRCMF_PCIE2_INTA			0x01
 #define BRCMF_PCIE2_INTB			0x02
 
@@ -168,8 +142,6 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define	BRCMF_PCIE_MB_INT_D2H3_DB0		0x400000
 #define	BRCMF_PCIE_MB_INT_D2H3_DB1		0x800000
 
-#define BRCMF_PCIE_MB_INT_FN0			(BRCMF_PCIE_MB_INT_FN0_0 | \
-						 BRCMF_PCIE_MB_INT_FN0_1)
 #define BRCMF_PCIE_MB_INT_D2H_DB		(BRCMF_PCIE_MB_INT_D2H0_DB0 | \
 						 BRCMF_PCIE_MB_INT_D2H0_DB1 | \
 						 BRCMF_PCIE_MB_INT_D2H1_DB0 | \
@@ -178,40 +150,6 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 						 BRCMF_PCIE_MB_INT_D2H2_DB1 | \
 						 BRCMF_PCIE_MB_INT_D2H3_DB0 | \
 						 BRCMF_PCIE_MB_INT_D2H3_DB1)
-
-#define	BRCMF_PCIE_64_MB_INT_D2H0_DB0		0x1
-#define	BRCMF_PCIE_64_MB_INT_D2H0_DB1		0x2
-#define	BRCMF_PCIE_64_MB_INT_D2H1_DB0		0x4
-#define	BRCMF_PCIE_64_MB_INT_D2H1_DB1		0x8
-#define	BRCMF_PCIE_64_MB_INT_D2H2_DB0		0x10
-#define	BRCMF_PCIE_64_MB_INT_D2H2_DB1		0x20
-#define	BRCMF_PCIE_64_MB_INT_D2H3_DB0		0x40
-#define	BRCMF_PCIE_64_MB_INT_D2H3_DB1		0x80
-#define	BRCMF_PCIE_64_MB_INT_D2H4_DB0		0x100
-#define	BRCMF_PCIE_64_MB_INT_D2H4_DB1		0x200
-#define	BRCMF_PCIE_64_MB_INT_D2H5_DB0		0x400
-#define	BRCMF_PCIE_64_MB_INT_D2H5_DB1		0x800
-#define	BRCMF_PCIE_64_MB_INT_D2H6_DB0		0x1000
-#define	BRCMF_PCIE_64_MB_INT_D2H6_DB1		0x2000
-#define	BRCMF_PCIE_64_MB_INT_D2H7_DB0		0x4000
-#define	BRCMF_PCIE_64_MB_INT_D2H7_DB1		0x8000
-
-#define BRCMF_PCIE_64_MB_INT_D2H_DB		(BRCMF_PCIE_64_MB_INT_D2H0_DB0 | \
-						 BRCMF_PCIE_64_MB_INT_D2H0_DB1 | \
-						 BRCMF_PCIE_64_MB_INT_D2H1_DB0 | \
-						 BRCMF_PCIE_64_MB_INT_D2H1_DB1 | \
-						 BRCMF_PCIE_64_MB_INT_D2H2_DB0 | \
-						 BRCMF_PCIE_64_MB_INT_D2H2_DB1 | \
-						 BRCMF_PCIE_64_MB_INT_D2H3_DB0 | \
-						 BRCMF_PCIE_64_MB_INT_D2H3_DB1 | \
-						 BRCMF_PCIE_64_MB_INT_D2H4_DB0 | \
-						 BRCMF_PCIE_64_MB_INT_D2H4_DB1 | \
-						 BRCMF_PCIE_64_MB_INT_D2H5_DB0 | \
-						 BRCMF_PCIE_64_MB_INT_D2H5_DB1 | \
-						 BRCMF_PCIE_64_MB_INT_D2H6_DB0 | \
-						 BRCMF_PCIE_64_MB_INT_D2H6_DB1 | \
-						 BRCMF_PCIE_64_MB_INT_D2H7_DB0 | \
-						 BRCMF_PCIE_64_MB_INT_D2H7_DB1)
 
 #define BRCMF_PCIE_SHARED_VERSION_7		7
 #define BRCMF_PCIE_MIN_SHARED_VERSION		5
@@ -317,13 +255,9 @@ struct brcmf_pcie_shared_info {
 	u8 version;
 };
 
-#define BRCMF_OTP_MAX_PARAM_LEN 16
-
-struct brcmf_otp_params {
-	char module[BRCMF_OTP_MAX_PARAM_LEN];
-	char vendor[BRCMF_OTP_MAX_PARAM_LEN];
-	char version[BRCMF_OTP_MAX_PARAM_LEN];
-	bool valid;
+struct brcmf_pcie_core_info {
+	u32 base;
+	u32 wrapbase;
 };
 
 struct brcmf_pciedev_info {
@@ -332,11 +266,6 @@ struct brcmf_pciedev_info {
 	struct pci_dev *pdev;
 	char fw_name[BRCMF_FW_NAME_LEN];
 	char nvram_name[BRCMF_FW_NAME_LEN];
-	char clm_name[BRCMF_FW_NAME_LEN];
-	char txcap_name[BRCMF_FW_NAME_LEN];
-	const struct firmware *clm_fw;
-	const struct firmware *txcap_fw;
-	const struct brcmf_pcie_reginfo *reginfo;
 	void __iomem *regs;
 	void __iomem *tcm;
 	u32 ram_base;
@@ -356,13 +285,6 @@ struct brcmf_pciedev_info {
 	void (*write_ptr)(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 			  u16 value);
 	struct brcmf_mp_device *settings;
-	struct brcmf_otp_params otp;
-	bool fwseed;
-#ifdef DEBUG
-	u32 console_interval;
-	bool console_active;
-	struct timer_list timer;
-#endif
 };
 
 struct brcmf_pcie_ringbuf {
@@ -429,51 +351,10 @@ static const u32 brcmf_ring_itemsize[BRCMF_NROF_COMMON_MSGRINGS] = {
 	BRCMF_D2H_MSGRING_RX_COMPLETE_ITEMSIZE
 };
 
-struct brcmf_pcie_reginfo {
-	u32 intmask;
-	u32 mailboxint;
-	u32 mailboxmask;
-	u32 h2d_mailbox_0;
-	u32 h2d_mailbox_1;
-	u32 int_d2h_db;
-	u32 int_fn0;
-};
-
-static const struct brcmf_pcie_reginfo brcmf_reginfo_default = {
-	.intmask = BRCMF_PCIE_PCIE2REG_INTMASK,
-	.mailboxint = BRCMF_PCIE_PCIE2REG_MAILBOXINT,
-	.mailboxmask = BRCMF_PCIE_PCIE2REG_MAILBOXMASK,
-	.h2d_mailbox_0 = BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_0,
-	.h2d_mailbox_1 = BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_1,
-	.int_d2h_db = BRCMF_PCIE_MB_INT_D2H_DB,
-	.int_fn0 = BRCMF_PCIE_MB_INT_FN0,
-};
-
-static const struct brcmf_pcie_reginfo brcmf_reginfo_64 = {
-	.intmask = BRCMF_PCIE_64_PCIE2REG_INTMASK,
-	.mailboxint = BRCMF_PCIE_64_PCIE2REG_MAILBOXINT,
-	.mailboxmask = BRCMF_PCIE_64_PCIE2REG_MAILBOXMASK,
-	.h2d_mailbox_0 = BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_0,
-	.h2d_mailbox_1 = BRCMF_PCIE_64_PCIE2REG_H2D_MAILBOX_1,
-	.int_d2h_db = BRCMF_PCIE_64_MB_INT_D2H_DB,
-	.int_fn0 = 0,
-};
-
 static void brcmf_pcie_setup(struct device *dev, int ret,
 			     struct brcmf_fw_request *fwreq);
 static struct brcmf_fw_request *
 brcmf_pcie_prepare_fw_request(struct brcmf_pciedev_info *devinfo);
-static void
-brcmf_pcie_fwcon_timer(struct brcmf_pciedev_info *devinfo, bool active);
-static void brcmf_pcie_debugfs_create(struct device *dev);
-
-static u16
-brcmf_pcie_read_reg16(struct brcmf_pciedev_info *devinfo, u32 reg_offset)
-{
-	void __iomem *address = devinfo->regs + reg_offset;
-
-	return ioread16(address);
-}
 
 static u32
 brcmf_pcie_read_reg32(struct brcmf_pciedev_info *devinfo, u32 reg_offset)
@@ -620,8 +501,6 @@ brcmf_pcie_copy_dev_tomem(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 }
 
 
-#define READCC32(devinfo, reg) brcmf_pcie_read_reg32(devinfo, \
-		CHIPCREGOFFS(reg))
 #define WRITECC32(devinfo, reg, value) brcmf_pcie_write_reg32(devinfo, \
 		CHIPCREGOFFS(reg), value)
 
@@ -656,19 +535,17 @@ brcmf_pcie_select_core(struct brcmf_pciedev_info *devinfo, u16 coreid)
 static void brcmf_pcie_reset_device(struct brcmf_pciedev_info *devinfo)
 {
 	struct brcmf_core *core;
-	static const u16 cfg_offset[] = {
-		BRCMF_PCIE_CFGREG_STATUS_CMD,
-		BRCMF_PCIE_CFGREG_PM_CSR,
-		BRCMF_PCIE_CFGREG_MSI_CAP,
-		BRCMF_PCIE_CFGREG_MSI_ADDR_L,
-		BRCMF_PCIE_CFGREG_MSI_ADDR_H,
-		BRCMF_PCIE_CFGREG_MSI_DATA,
-		BRCMF_PCIE_CFGREG_LINK_STATUS_CTRL2,
-		BRCMF_PCIE_CFGREG_RBAR_CTRL,
-		BRCMF_PCIE_CFGREG_PML1_SUB_CTRL1,
-		BRCMF_PCIE_CFGREG_REG_BAR2_CONFIG,
-		BRCMF_PCIE_CFGREG_REG_BAR3_CONFIG
-	};
+	u16 cfg_offset[] = { BRCMF_PCIE_CFGREG_STATUS_CMD,
+			     BRCMF_PCIE_CFGREG_PM_CSR,
+			     BRCMF_PCIE_CFGREG_MSI_CAP,
+			     BRCMF_PCIE_CFGREG_MSI_ADDR_L,
+			     BRCMF_PCIE_CFGREG_MSI_ADDR_H,
+			     BRCMF_PCIE_CFGREG_MSI_DATA,
+			     BRCMF_PCIE_CFGREG_LINK_STATUS_CTRL2,
+			     BRCMF_PCIE_CFGREG_RBAR_CTRL,
+			     BRCMF_PCIE_CFGREG_PML1_SUB_CTRL1,
+			     BRCMF_PCIE_CFGREG_REG_BAR2_CONFIG,
+			     BRCMF_PCIE_CFGREG_REG_BAR3_CONFIG };
 	u32 i;
 	u32 val;
 	u32 lsc;
@@ -754,7 +631,7 @@ static int brcmf_pcie_exit_download_state(struct brcmf_pciedev_info *devinfo,
 	}
 
 	if (!brcmf_chip_set_active(devinfo->ci, resetintr))
-		return -EIO;
+		return -EINVAL;
 	return 0;
 }
 
@@ -872,8 +749,6 @@ static void brcmf_pcie_bus_console_read(struct brcmf_pciedev_info *devinfo,
 		return;
 
 	console = &devinfo->shared.console;
-	if (!console->base_addr)
-		return;
 	addr = console->base_addr + BRCMF_CONSOLE_WRITEIDX_OFFSET;
 	newidx = brcmf_pcie_read_tcm32(devinfo, addr);
 	while (newidx != console->read_idx) {
@@ -907,29 +782,30 @@ static void brcmf_pcie_bus_console_read(struct brcmf_pciedev_info *devinfo,
 
 static void brcmf_pcie_intr_disable(struct brcmf_pciedev_info *devinfo)
 {
-	brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->mailboxmask, 0);
+	brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXMASK, 0);
 }
 
 
 static void brcmf_pcie_intr_enable(struct brcmf_pciedev_info *devinfo)
 {
-	brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->mailboxmask,
-			       devinfo->reginfo->int_d2h_db |
-			       devinfo->reginfo->int_fn0);
+	brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXMASK,
+			       BRCMF_PCIE_MB_INT_D2H_DB |
+			       BRCMF_PCIE_MB_INT_FN0_0 |
+			       BRCMF_PCIE_MB_INT_FN0_1);
 }
 
 static void brcmf_pcie_hostready(struct brcmf_pciedev_info *devinfo)
 {
 	if (devinfo->shared.flags & BRCMF_PCIE_SHARED_HOSTRDY_DB1)
 		brcmf_pcie_write_reg32(devinfo,
-				       devinfo->reginfo->h2d_mailbox_1, 1);
+				       BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_1, 1);
 }
 
 static irqreturn_t brcmf_pcie_quick_check_isr(int irq, void *arg)
 {
 	struct brcmf_pciedev_info *devinfo = (struct brcmf_pciedev_info *)arg;
 
-	if (brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxint)) {
+	if (brcmf_pcie_read_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT)) {
 		brcmf_pcie_intr_disable(devinfo);
 		brcmf_dbg(PCIE, "Enter\n");
 		return IRQ_WAKE_THREAD;
@@ -944,14 +820,15 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
 	u32 status;
 
 	devinfo->in_irq = true;
-	status = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxint);
+	status = brcmf_pcie_read_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT);
 	brcmf_dbg(PCIE, "Enter %x\n", status);
 	if (status) {
-		brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->mailboxint,
+		brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT,
 				       status);
-		if (status & devinfo->reginfo->int_fn0)
+		if (status & (BRCMF_PCIE_MB_INT_FN0_0 |
+			      BRCMF_PCIE_MB_INT_FN0_1))
 			brcmf_pcie_handle_mb_data(devinfo);
-		if (status & devinfo->reginfo->int_d2h_db) {
+		if (status & BRCMF_PCIE_MB_INT_D2H_DB) {
 			if (devinfo->state == BRCMFMAC_PCIE_STATE_UP)
 				brcmf_proto_msgbuf_rx_trigger(
 							&devinfo->pdev->dev);
@@ -1010,8 +887,8 @@ static void brcmf_pcie_release_irq(struct brcmf_pciedev_info *devinfo)
 	if (devinfo->in_irq)
 		brcmf_err(bus, "Still in IRQ (processing) !!!\n");
 
-	status = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxint);
-	brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->mailboxint, status);
+	status = brcmf_pcie_read_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT);
+	brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT, status);
 
 	devinfo->irq_allocated = false;
 }
@@ -1063,7 +940,7 @@ static int brcmf_pcie_ring_mb_ring_bell(void *ctx)
 
 	brcmf_dbg(PCIE, "RING !\n");
 	/* Any arbitrary value will do, lets use 1 */
-	brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->h2d_mailbox_0, 1);
+	brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_H2D_MAILBOX_0, 1);
 
 	return 0;
 }
@@ -1245,10 +1122,6 @@ static int brcmf_pcie_init_ringbuffers(struct brcmf_pciedev_info *devinfo)
 		max_flowrings = max_submissionrings -
 				BRCMF_NROF_H2D_COMMON_MSGRINGS;
 		max_completionrings = BRCMF_NROF_D2H_COMMON_MSGRINGS;
-	}
-	if (max_flowrings > 512) {
-		brcmf_err(bus, "invalid max_flowrings(%d)\n", max_flowrings);
-		return -EIO;
 	}
 
 	if (devinfo->dma_idx_sz != 0) {
@@ -1445,11 +1318,6 @@ fail:
 
 static void brcmf_pcie_down(struct device *dev)
 {
-	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
-	struct brcmf_pciedev *pcie_bus_dev = bus_if->bus_priv.pcie;
-	struct brcmf_pciedev_info *devinfo = pcie_bus_dev->devinfo;
-
-	brcmf_pcie_fwcon_timer(devinfo, false);
 }
 
 static int brcmf_pcie_preinit(struct device *dev)
@@ -1517,29 +1385,28 @@ static int brcmf_pcie_get_memdump(struct device *dev, void *data, size_t len)
 	return 0;
 }
 
-static int brcmf_pcie_get_blob(struct device *dev, const struct firmware **fw,
-			       enum brcmf_blob_type type)
+static
+int brcmf_pcie_get_fwname(struct device *dev, const char *ext, u8 *fw_name,
+			  bool board_specific)
 {
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
-	struct brcmf_pciedev *buspub = bus_if->bus_priv.pcie;
-	struct brcmf_pciedev_info *devinfo = buspub->devinfo;
+	struct brcmf_fw_request *fwreq;
+	struct brcmf_fw_name fwnames[] = {
+		{ ext, fw_name },
+	};
 
-	switch (type) {
-	case BRCMF_BLOB_CLM:
-		*fw = devinfo->clm_fw;
-		devinfo->clm_fw = NULL;
-		break;
-	case BRCMF_BLOB_TXCAP:
-		*fw = devinfo->txcap_fw;
-		devinfo->txcap_fw = NULL;
-		break;
-	default:
-		return -ENOENT;
+	if (board_specific) {
+		fw_name[0] = 0;
+		return 0;
 	}
+	fwreq = brcmf_fw_alloc_request(bus_if->chip, bus_if->chiprev,
+				       brcmf_pcie_fwnames,
+				       ARRAY_SIZE(brcmf_pcie_fwnames),
+				       fwnames, ARRAY_SIZE(fwnames));
+	if (!fwreq)
+		return -ENOMEM;
 
-	if (!*fw)
-		return -ENOENT;
-
+	kfree(fwreq);
 	return 0;
 }
 
@@ -1586,9 +1453,8 @@ static const struct brcmf_bus_ops brcmf_pcie_bus_ops = {
 	.wowl_config = brcmf_pcie_wowl_config,
 	.get_ramsize = brcmf_pcie_get_ramsize,
 	.get_memdump = brcmf_pcie_get_memdump,
-	.get_blob = brcmf_pcie_get_blob,
+	.get_fwname = brcmf_pcie_get_fwname,
 	.reset = brcmf_pcie_reset,
-	.debugfs_create = brcmf_pcie_debugfs_create,
 };
 
 
@@ -1664,27 +1530,10 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 		  shared->max_rxbufpost, shared->rx_dataoffset);
 
 	brcmf_pcie_bus_console_init(devinfo);
-	brcmf_pcie_bus_console_read(devinfo, false);
 
 	return 0;
 }
 
-struct brcmf_random_seed_footer {
-	__le32 length;
-	__le32 magic;
-};
-
-#define BRCMF_RANDOM_SEED_MAGIC		0xfeedc0de
-#define BRCMF_RANDOM_SEED_LENGTH	0x100
-
-static noinline_for_stack void
-brcmf_pcie_provide_random_bytes(struct brcmf_pciedev_info *devinfo, u32 address)
-{
-	u8 randbuf[BRCMF_RANDOM_SEED_LENGTH];
-
-	get_random_bytes(randbuf, BRCMF_RANDOM_SEED_LENGTH);
-	memcpy_toio(devinfo->tcm + address, randbuf, BRCMF_RANDOM_SEED_LENGTH);
-}
 
 static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 					const struct firmware *fw, void *nvram,
@@ -1721,26 +1570,6 @@ static int brcmf_pcie_download_fw_nvram(struct brcmf_pciedev_info *devinfo,
 			  nvram_len;
 		memcpy_toio(devinfo->tcm + address, nvram, nvram_len);
 		brcmf_fw_nvram_free(nvram);
-
-		if (devinfo->fwseed) {
-			size_t rand_len = BRCMF_RANDOM_SEED_LENGTH;
-			struct brcmf_random_seed_footer footer = {
-				.length = cpu_to_le32(rand_len),
-				.magic = cpu_to_le32(BRCMF_RANDOM_SEED_MAGIC),
-			};
-
-			/* Some chips/firmwares expect a buffer of random
-			 * data to be present before NVRAM
-			 */
-			brcmf_dbg(PCIE, "Download random seed\n");
-
-			address -= sizeof(footer);
-			memcpy_toio(devinfo->tcm + address, &footer,
-				    sizeof(footer));
-
-			address -= rand_len;
-			brcmf_pcie_provide_random_bytes(devinfo, address);
-		}
 	} else {
 		brcmf_dbg(PCIE, "No matching NVRAM file found %s\n",
 			  devinfo->nvram_name);
@@ -1876,22 +1705,15 @@ static int brcmf_pcie_buscoreprep(void *ctx)
 static int brcmf_pcie_buscore_reset(void *ctx, struct brcmf_chip *chip)
 {
 	struct brcmf_pciedev_info *devinfo = (struct brcmf_pciedev_info *)ctx;
-	struct brcmf_core *core;
-	u32 val, reg;
+	u32 val;
 
 	devinfo->ci = chip;
 	brcmf_pcie_reset_device(devinfo);
 
-	/* reginfo is not ready yet */
-	core = brcmf_chip_get_core(chip, BCMA_CORE_PCIE2);
-	if (core->rev >= 64)
-		reg = BRCMF_PCIE_64_PCIE2REG_MAILBOXINT;
-	else
-		reg = BRCMF_PCIE_PCIE2REG_MAILBOXINT;
-
-	val = brcmf_pcie_read_reg32(devinfo, reg);
+	val = brcmf_pcie_read_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT);
 	if (val != 0xffffffff)
-		brcmf_pcie_write_reg32(devinfo, reg, val);
+		brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_MAILBOXINT,
+				       val);
 
 	return 0;
 }
@@ -1914,223 +1736,8 @@ static const struct brcmf_buscore_ops brcmf_pcie_buscore_ops = {
 	.write32 = brcmf_pcie_buscore_write32,
 };
 
-#define BRCMF_OTP_SYS_VENDOR	0x15
-#define BRCMF_OTP_BRCM_CIS	0x80
-
-#define BRCMF_OTP_VENDOR_HDR	0x00000008
-
-static int
-brcmf_pcie_parse_otp_sys_vendor(struct brcmf_pciedev_info *devinfo,
-				u8 *data, size_t size)
-{
-	int idx = 4;
-	const char *chip_params;
-	const char *board_params;
-	const char *p;
-
-	/* 4-byte header and two empty strings */
-	if (size < 6)
-		return -EINVAL;
-
-	if (get_unaligned_le32(data) != BRCMF_OTP_VENDOR_HDR)
-		return -EINVAL;
-
-	chip_params = &data[idx];
-
-	/* Skip first string, including terminator */
-	idx += strnlen(chip_params, size - idx) + 1;
-	if (idx >= size)
-		return -EINVAL;
-
-	board_params = &data[idx];
-
-	/* Skip to terminator of second string */
-	idx += strnlen(board_params, size - idx);
-	if (idx >= size)
-		return -EINVAL;
-
-	/* At this point both strings are guaranteed NUL-terminated */
-	brcmf_dbg(PCIE, "OTP: chip_params='%s' board_params='%s'\n",
-		  chip_params, board_params);
-
-	p = skip_spaces(board_params);
-	while (*p) {
-		char tag = *p++;
-		const char *end;
-		size_t len;
-
-		if (*p++ != '=') /* implicit NUL check */
-			return -EINVAL;
-
-		/* *p might be NUL here, if so end == p and len == 0 */
-		end = strchrnul(p, ' ');
-		len = end - p;
-
-		/* leave 1 byte for NUL in destination string */
-		if (len > (BRCMF_OTP_MAX_PARAM_LEN - 1))
-			return -EINVAL;
-
-		/* Copy len characters plus a NUL terminator */
-		switch (tag) {
-		case 'M':
-			strscpy(devinfo->otp.module, p, len + 1);
-			break;
-		case 'V':
-			strscpy(devinfo->otp.vendor, p, len + 1);
-			break;
-		case 'm':
-			strscpy(devinfo->otp.version, p, len + 1);
-			break;
-		}
-
-		/* Skip to next arg, if any */
-		p = skip_spaces(end);
-	}
-
-	brcmf_dbg(PCIE, "OTP: module=%s vendor=%s version=%s\n",
-		  devinfo->otp.module, devinfo->otp.vendor,
-		  devinfo->otp.version);
-
-	if (!devinfo->otp.module[0] ||
-	    !devinfo->otp.vendor[0] ||
-	    !devinfo->otp.version[0])
-		return -EINVAL;
-
-	devinfo->otp.valid = true;
-	return 0;
-}
-
-static int
-brcmf_pcie_parse_otp(struct brcmf_pciedev_info *devinfo, u8 *otp, size_t size)
-{
-	int p = 0;
-	int ret = -EINVAL;
-
-	brcmf_dbg(PCIE, "parse_otp size=%zd\n", size);
-
-	while (p < (size - 1)) {
-		u8 type = otp[p];
-		u8 length = otp[p + 1];
-
-		if (type == 0)
-			break;
-
-		if ((p + 2 + length) > size)
-			break;
-
-		switch (type) {
-		case BRCMF_OTP_SYS_VENDOR:
-			brcmf_dbg(PCIE, "OTP @ 0x%x (%d): SYS_VENDOR\n",
-				  p, length);
-			ret = brcmf_pcie_parse_otp_sys_vendor(devinfo,
-							      &otp[p + 2],
-							      length);
-			break;
-		case BRCMF_OTP_BRCM_CIS:
-			brcmf_dbg(PCIE, "OTP @ 0x%x (%d): BRCM_CIS\n",
-				  p, length);
-			break;
-		default:
-			brcmf_dbg(PCIE, "OTP @ 0x%x (%d): Unknown type 0x%x\n",
-				  p, length, type);
-			break;
-		}
-
-		p += 2 + length;
-	}
-
-	return ret;
-}
-
-static int brcmf_pcie_read_otp(struct brcmf_pciedev_info *devinfo)
-{
-	const struct pci_dev *pdev = devinfo->pdev;
-	struct brcmf_bus *bus = dev_get_drvdata(&pdev->dev);
-	u32 coreid, base, words, idx, sromctl;
-	u16 *otp;
-	struct brcmf_core *core;
-	int ret;
-
-	switch (devinfo->ci->chip) {
-	case BRCM_CC_4355_CHIP_ID:
-		coreid = BCMA_CORE_CHIPCOMMON;
-		base = 0x8c0;
-		words = 0xb2;
-		break;
-	case BRCM_CC_4364_CHIP_ID:
-		coreid = BCMA_CORE_CHIPCOMMON;
-		base = 0x8c0;
-		words = 0x1a0;
-		break;
-	case BRCM_CC_4377_CHIP_ID:
-	case BRCM_CC_4378_CHIP_ID:
-		coreid = BCMA_CORE_GCI;
-		base = 0x1120;
-		words = 0x170;
-		break;
-	case BRCM_CC_4387_CHIP_ID:
-		coreid = BCMA_CORE_GCI;
-		base = 0x113c;
-		words = 0x170;
-		break;
-	default:
-		/* OTP not supported on this chip */
-		return 0;
-	}
-
-	core = brcmf_chip_get_core(devinfo->ci, coreid);
-	if (!core) {
-		brcmf_err(bus, "No OTP core\n");
-		return -ENODEV;
-	}
-
-	if (coreid == BCMA_CORE_CHIPCOMMON) {
-		/* Chips with OTP accessed via ChipCommon need additional
-		 * handling to access the OTP
-		 */
-		brcmf_pcie_select_core(devinfo, coreid);
-		sromctl = READCC32(devinfo, sromcontrol);
-
-		if (!(sromctl & BCMA_CC_SROM_CONTROL_OTP_PRESENT)) {
-			/* Chip lacks OTP, try without it... */
-			brcmf_err(bus,
-				  "OTP unavailable, using default firmware\n");
-			return 0;
-		}
-
-		/* Map OTP to shadow area */
-		WRITECC32(devinfo, sromcontrol,
-			  sromctl | BCMA_CC_SROM_CONTROL_OTPSEL);
-	}
-
-	otp = kcalloc(words, sizeof(u16), GFP_KERNEL);
-	if (!otp)
-		return -ENOMEM;
-
-	/* Map bus window to SROM/OTP shadow area in core */
-	base = brcmf_pcie_buscore_prep_addr(devinfo->pdev, base + core->base);
-
-	brcmf_dbg(PCIE, "OTP data:\n");
-	for (idx = 0; idx < words; idx++) {
-		otp[idx] = brcmf_pcie_read_reg16(devinfo, base + 2 * idx);
-		brcmf_dbg(PCIE, "[%8x] 0x%04x\n", base + 2 * idx, otp[idx]);
-	}
-
-	if (coreid == BCMA_CORE_CHIPCOMMON) {
-		brcmf_pcie_select_core(devinfo, coreid);
-		WRITECC32(devinfo, sromcontrol, sromctl);
-	}
-
-	ret = brcmf_pcie_parse_otp(devinfo, (u8 *)otp, 2 * words);
-	kfree(otp);
-
-	return ret;
-}
-
 #define BRCMF_PCIE_FW_CODE	0
 #define BRCMF_PCIE_FW_NVRAM	1
-#define BRCMF_PCIE_FW_CLM	2
-#define BRCMF_PCIE_FW_TXCAP	3
 
 static void brcmf_pcie_setup(struct device *dev, int ret,
 			     struct brcmf_fw_request *fwreq)
@@ -2143,21 +1750,18 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
 	struct brcmf_commonring **flowrings;
 	u32 i, nvram_len;
 
-	bus = dev_get_drvdata(dev);
-	pcie_bus_dev = bus->bus_priv.pcie;
-	devinfo = pcie_bus_dev->devinfo;
-
 	/* check firmware loading result */
 	if (ret)
 		goto fail;
 
+	bus = dev_get_drvdata(dev);
+	pcie_bus_dev = bus->bus_priv.pcie;
+	devinfo = pcie_bus_dev->devinfo;
 	brcmf_pcie_attach(devinfo);
 
 	fw = fwreq->items[BRCMF_PCIE_FW_CODE].binary;
 	nvram = fwreq->items[BRCMF_PCIE_FW_NVRAM].nv_data.data;
 	nvram_len = fwreq->items[BRCMF_PCIE_FW_NVRAM].nv_data.len;
-	devinfo->clm_fw = fwreq->items[BRCMF_PCIE_FW_CLM].binary;
-	devinfo->txcap_fw = fwreq->items[BRCMF_PCIE_FW_TXCAP].binary;
 	kfree(fwreq);
 
 	ret = brcmf_chip_get_raminfo(devinfo->ci);
@@ -2220,14 +1824,9 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
 
 	brcmf_pcie_bus_console_read(devinfo, false);
 
-	brcmf_pcie_fwcon_timer(devinfo, true);
-
 	return;
 
 fail:
-	brcmf_err(bus, "Dongle setup failed\n");
-	brcmf_pcie_bus_console_read(devinfo, true);
-	brcmf_fw_crashed(dev);
 	device_release_driver(dev);
 }
 
@@ -2238,8 +1837,6 @@ brcmf_pcie_prepare_fw_request(struct brcmf_pciedev_info *devinfo)
 	struct brcmf_fw_name fwnames[] = {
 		{ ".bin", devinfo->fw_name },
 		{ ".txt", devinfo->nvram_name },
-		{ ".clm_blob", devinfo->clm_name },
-		{ ".txcap_blob", devinfo->txcap_name },
 	};
 
 	fwreq = brcmf_fw_alloc_request(devinfo->ci->chip, devinfo->ci->chiprev,
@@ -2252,189 +1849,13 @@ brcmf_pcie_prepare_fw_request(struct brcmf_pciedev_info *devinfo)
 	fwreq->items[BRCMF_PCIE_FW_CODE].type = BRCMF_FW_TYPE_BINARY;
 	fwreq->items[BRCMF_PCIE_FW_NVRAM].type = BRCMF_FW_TYPE_NVRAM;
 	fwreq->items[BRCMF_PCIE_FW_NVRAM].flags = BRCMF_FW_REQF_OPTIONAL;
-	fwreq->items[BRCMF_PCIE_FW_CLM].type = BRCMF_FW_TYPE_BINARY;
-	fwreq->items[BRCMF_PCIE_FW_CLM].flags = BRCMF_FW_REQF_OPTIONAL;
-	fwreq->items[BRCMF_PCIE_FW_TXCAP].type = BRCMF_FW_TYPE_BINARY;
-	fwreq->items[BRCMF_PCIE_FW_TXCAP].flags = BRCMF_FW_REQF_OPTIONAL;
+	fwreq->board_type = devinfo->settings->board_type;
 	/* NVRAM reserves PCI domain 0 for Broadcom's SDK faked bus */
 	fwreq->domain_nr = pci_domain_nr(devinfo->pdev->bus) + 1;
 	fwreq->bus_nr = devinfo->pdev->bus->number;
 
-	/* Apple platforms with fancy firmware/NVRAM selection */
-	if (devinfo->settings->board_type &&
-	    devinfo->settings->antenna_sku &&
-	    devinfo->otp.valid) {
-		const struct brcmf_otp_params *otp = &devinfo->otp;
-		struct device *dev = &devinfo->pdev->dev;
-		const char **bt = fwreq->board_types;
-
-		brcmf_dbg(PCIE, "Apple board: %s\n",
-			  devinfo->settings->board_type);
-
-		/* Example: apple,shikoku-RASP-m-6.11-X3 */
-		bt[0] = devm_kasprintf(dev, GFP_KERNEL, "%s-%s-%s-%s-%s",
-				       devinfo->settings->board_type,
-				       otp->module, otp->vendor, otp->version,
-				       devinfo->settings->antenna_sku);
-		bt[1] = devm_kasprintf(dev, GFP_KERNEL, "%s-%s-%s-%s",
-				       devinfo->settings->board_type,
-				       otp->module, otp->vendor, otp->version);
-		bt[2] = devm_kasprintf(dev, GFP_KERNEL, "%s-%s-%s",
-				       devinfo->settings->board_type,
-				       otp->module, otp->vendor);
-		bt[3] = devm_kasprintf(dev, GFP_KERNEL, "%s-%s",
-				       devinfo->settings->board_type,
-				       otp->module);
-		bt[4] = devm_kasprintf(dev, GFP_KERNEL, "%s-%s",
-				       devinfo->settings->board_type,
-				       devinfo->settings->antenna_sku);
-		bt[5] = devinfo->settings->board_type;
-
-		if (!bt[0] || !bt[1] || !bt[2] || !bt[3] || !bt[4]) {
-			kfree(fwreq);
-			return NULL;
-		}
-	} else {
-		brcmf_dbg(PCIE, "Board: %s\n", devinfo->settings->board_type);
-		fwreq->board_types[0] = devinfo->settings->board_type;
-	}
-
 	return fwreq;
 }
-
-#ifdef DEBUG
-static void
-brcmf_pcie_fwcon_timer(struct brcmf_pciedev_info *devinfo, bool active)
-{
-	if (!active) {
-		if (devinfo->console_active) {
-			timer_delete_sync(&devinfo->timer);
-			devinfo->console_active = false;
-		}
-		return;
-	}
-
-	/* don't start the timer */
-	if (devinfo->state != BRCMFMAC_PCIE_STATE_UP ||
-	    !devinfo->console_interval || !BRCMF_FWCON_ON())
-		return;
-
-	if (!devinfo->console_active) {
-		devinfo->timer.expires = jiffies + devinfo->console_interval;
-		add_timer(&devinfo->timer);
-		devinfo->console_active = true;
-	} else {
-		/* Reschedule the timer */
-		mod_timer(&devinfo->timer, jiffies + devinfo->console_interval);
-	}
-}
-
-static void
-brcmf_pcie_fwcon(struct timer_list *t)
-{
-	struct brcmf_pciedev_info *devinfo = timer_container_of(devinfo, t,
-								timer);
-
-	if (!devinfo->console_active)
-		return;
-
-	brcmf_pcie_bus_console_read(devinfo, false);
-
-	/* Reschedule the timer if console interval is not zero */
-	mod_timer(&devinfo->timer, jiffies + devinfo->console_interval);
-}
-
-static int brcmf_pcie_console_interval_get(void *data, u64 *val)
-{
-	struct brcmf_pciedev_info *devinfo = data;
-
-	*val = devinfo->console_interval;
-
-	return 0;
-}
-
-static int brcmf_pcie_console_interval_set(void *data, u64 val)
-{
-	struct brcmf_pciedev_info *devinfo = data;
-
-	if (val > MAX_CONSOLE_INTERVAL)
-		return -EINVAL;
-
-	devinfo->console_interval = val;
-
-	if (!val && devinfo->console_active)
-		brcmf_pcie_fwcon_timer(devinfo, false);
-	else if (val)
-		brcmf_pcie_fwcon_timer(devinfo, true);
-
-	return 0;
-}
-
-DEFINE_SIMPLE_ATTRIBUTE(brcmf_pcie_console_interval_fops,
-			brcmf_pcie_console_interval_get,
-			brcmf_pcie_console_interval_set,
-			"%llu\n");
-
-static void brcmf_pcie_debugfs_create(struct device *dev)
-{
-	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
-	struct brcmf_pub *drvr = bus_if->drvr;
-	struct brcmf_pciedev *pcie_bus_dev = bus_if->bus_priv.pcie;
-	struct brcmf_pciedev_info *devinfo = pcie_bus_dev->devinfo;
-	struct dentry *dentry = brcmf_debugfs_get_devdir(drvr);
-
-	if (IS_ERR_OR_NULL(dentry))
-		return;
-
-	devinfo->console_interval = BRCMF_CONSOLE;
-
-	debugfs_create_file("console_interval", 0644, dentry, devinfo,
-			    &brcmf_pcie_console_interval_fops);
-}
-
-#else
-void brcmf_pcie_fwcon_timer(struct brcmf_pciedev_info *devinfo, bool active)
-{
-}
-
-static void brcmf_pcie_debugfs_create(struct device *dev)
-{
-}
-#endif
-
-struct brcmf_pcie_drvdata {
-	enum brcmf_fwvendor vendor;
-	bool fw_seed;
-};
-
-enum {
-	BRCMF_DRVDATA_CYW,
-	BRCMF_DRVDATA_BCA,
-	BRCMF_DRVDATA_WCC,
-	BRCMF_DRVDATA_WCC_SEED,
-};
-
-static const struct brcmf_pcie_drvdata drvdata[] = {
-	[BRCMF_DRVDATA_CYW] = {
-		.vendor = BRCMF_FWVENDOR_CYW,
-		.fw_seed = false,
-	},
-	[BRCMF_DRVDATA_BCA] = {
-		.vendor = BRCMF_FWVENDOR_BCA,
-		.fw_seed = false,
-	},
-	[BRCMF_DRVDATA_WCC] = {
-		.vendor = BRCMF_FWVENDOR_WCC,
-		.fw_seed = false,
-	},
-	[BRCMF_DRVDATA_WCC_SEED] = {
-		.vendor = BRCMF_FWVENDOR_WCC,
-		.fw_seed = true,
-	},
-};
-
-/* Forward declaration for pci_match_id() call */
-static const struct pci_device_id brcmf_pcie_devid_table[];
 
 static int
 brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
@@ -2443,16 +1864,7 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	struct brcmf_fw_request *fwreq;
 	struct brcmf_pciedev_info *devinfo;
 	struct brcmf_pciedev *pcie_bus_dev;
-	struct brcmf_core *core;
 	struct brcmf_bus *bus;
-
-	if (!id) {
-		id = pci_match_id(brcmf_pcie_devid_table, pdev);
-		if (!id) {
-			pci_err(pdev, "Error could not find pci_device_id for %x:%x\n", pdev->vendor, pdev->device);
-			return -ENODEV;
-		}
-	}
 
 	brcmf_dbg(PCIE, "Enter %x:%x\n", pdev->vendor, pdev->device);
 
@@ -2471,12 +1883,6 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto fail;
 	}
 
-	core = brcmf_chip_get_core(devinfo->ci, BCMA_CORE_PCIE2);
-	if (core->rev >= 64)
-		devinfo->reginfo = &brcmf_reginfo_64;
-	else
-		devinfo->reginfo = &brcmf_reginfo_default;
-
 	pcie_bus_dev = kzalloc(sizeof(*pcie_bus_dev), GFP_KERNEL);
 	if (pcie_bus_dev == NULL) {
 		ret = -ENOMEM;
@@ -2491,9 +1897,6 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		ret = -ENOMEM;
 		goto fail;
 	}
-	ret = PTR_ERR_OR_ZERO(devinfo->settings);
-	if (ret < 0)
-		goto fail;
 
 	bus = kzalloc(sizeof(*bus), GFP_KERNEL);
 	if (!bus) {
@@ -2516,33 +1919,11 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	bus->proto_type = BRCMF_PROTO_MSGBUF;
 	bus->chip = devinfo->coreid;
 	bus->wowl_supported = pci_pme_capable(pdev, PCI_D3hot);
-	bus->fwvid = drvdata[id->driver_data].vendor;
-	devinfo->fwseed = drvdata[id->driver_data].fw_seed;
 	dev_set_drvdata(&pdev->dev, bus);
 
 	ret = brcmf_alloc(&devinfo->pdev->dev, devinfo->settings);
 	if (ret)
 		goto fail_bus;
-
-	/* otp read operation */
-	switch (bus->fwvid) {
-	case BRCMF_FWVENDOR_WCC:
-	case BRCMF_FWVENDOR_BCA:
-		ret = brcmf_pcie_read_otp(devinfo);
-		if (ret) {
-			brcmf_err(bus, "failed to parse OTP\n");
-			goto fail_brcmf;
-		}
-		break;
-	case BRCMF_FWVENDOR_CYW:
-	default:
-		break;
-	}
-
-#ifdef DEBUG
-	/* Set up the fwcon timer */
-	timer_setup(&devinfo->timer, brcmf_pcie_fwcon, 0);
-#endif
 
 	fwreq = brcmf_pcie_prepare_fw_request(devinfo);
 	if (!fwreq) {
@@ -2588,8 +1969,6 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 		return;
 
 	devinfo = bus->bus_priv.pcie->devinfo;
-	brcmf_pcie_bus_console_read(devinfo, false);
-	brcmf_pcie_fwcon_timer(devinfo, false);
 
 	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
 	if (devinfo->ci)
@@ -2608,8 +1987,6 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 	brcmf_pcie_release_ringbuffers(devinfo);
 	brcmf_pcie_reset_device(devinfo);
 	brcmf_pcie_release_resource(devinfo);
-	release_firmware(devinfo->clm_fw);
-	release_firmware(devinfo->txcap_fw);
 
 	if (devinfo->ci)
 		brcmf_chip_detach(devinfo->ci);
@@ -2634,7 +2011,6 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
 	bus = dev_get_drvdata(dev);
 	devinfo = bus->bus_priv.pcie->devinfo;
 
-	brcmf_pcie_fwcon_timer(devinfo, false);
 	brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
 
 	devinfo->mbdata_completed = false;
@@ -2668,7 +2044,7 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 	brcmf_dbg(PCIE, "Enter, dev=%p, bus=%p\n", dev, bus);
 
 	/* Check if device is still up and running, if so we are ready */
-	if (brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask) != 0) {
+	if (brcmf_pcie_read_reg32(devinfo, BRCMF_PCIE_PCIE2REG_INTMASK) != 0) {
 		brcmf_dbg(PCIE, "Try to wakeup device....\n");
 		if (brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D0_INFORM))
 			goto cleanup;
@@ -2678,7 +2054,6 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 		brcmf_bus_change_state(bus, BRCMF_BUS_UP);
 		brcmf_pcie_intr_enable(devinfo);
 		brcmf_pcie_hostready(devinfo);
-		brcmf_pcie_fwcon_timer(devinfo, true);
 		return 0;
 	}
 
@@ -2707,51 +2082,34 @@ static const struct dev_pm_ops brcmf_pciedrvr_pm = {
 #endif /* CONFIG_PM */
 
 
-#define BRCMF_PCIE_DEVICE(dev_id, fw_vend) \
-	{ \
-		BRCM_PCIE_VENDOR_ID_BROADCOM, (dev_id), \
-		PCI_ANY_ID, PCI_ANY_ID, \
-		PCI_CLASS_NETWORK_OTHER << 8, 0xffff00, \
-		BRCMF_DRVDATA_ ## fw_vend \
-	}
-#define BRCMF_PCIE_DEVICE_SUB(dev_id, subvend, subdev, fw_vend) \
-	{ \
-		BRCM_PCIE_VENDOR_ID_BROADCOM, (dev_id), \
-		(subvend), (subdev), \
-		PCI_CLASS_NETWORK_OTHER << 8, 0xffff00, \
-		BRCMF_DRVDATA_ ## fw_vend \
-	}
+#define BRCMF_PCIE_DEVICE(dev_id)	{ BRCM_PCIE_VENDOR_ID_BROADCOM, dev_id,\
+	PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_NETWORK_OTHER << 8, 0xffff00, 0 }
+#define BRCMF_PCIE_DEVICE_SUB(dev_id, subvend, subdev)	{ \
+	BRCM_PCIE_VENDOR_ID_BROADCOM, dev_id,\
+	subvend, subdev, PCI_CLASS_NETWORK_OTHER << 8, 0xffff00, 0 }
 
 static const struct pci_device_id brcmf_pcie_devid_table[] = {
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4350_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE_SUB(0x4355, BRCM_PCIE_VENDOR_ID_BROADCOM, 0x4355, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4354_RAW_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4355_DEVICE_ID, WCC_SEED),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4356_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43567_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43570_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43570_RAW_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4358_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4359_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_2G_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_5G_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_RAW_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4364_DEVICE_ID, WCC_SEED),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4365_DEVICE_ID, BCA),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4365_2G_DEVICE_ID, BCA),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4365_5G_DEVICE_ID, BCA),
-	BRCMF_PCIE_DEVICE_SUB(0x4365, BRCM_PCIE_VENDOR_ID_BROADCOM, 0x4365, BCA),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4366_DEVICE_ID, BCA),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4366_2G_DEVICE_ID, BCA),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4366_5G_DEVICE_ID, BCA),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4371_DEVICE_ID, WCC),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43596_DEVICE_ID, CYW),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4377_DEVICE_ID, WCC_SEED),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4378_DEVICE_ID, WCC_SEED),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_4387_DEVICE_ID, WCC_SEED),
-	BRCMF_PCIE_DEVICE(BRCM_PCIE_43752_DEVICE_ID, WCC_SEED),
-	BRCMF_PCIE_DEVICE(CY_PCIE_54591_DEVICE_ID, CYW),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4350_DEVICE_ID),
+	BRCMF_PCIE_DEVICE_SUB(0x4355, BRCM_PCIE_VENDOR_ID_BROADCOM, 0x4355),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4354_RAW_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4356_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_43567_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_43570_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4358_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4359_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_2G_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_5G_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_43602_RAW_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4364_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4365_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4365_2G_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4365_5G_DEVICE_ID),
+	BRCMF_PCIE_DEVICE_SUB(0x4365, BRCM_PCIE_VENDOR_ID_BROADCOM, 0x4365),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4366_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4366_2G_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4366_5G_DEVICE_ID),
+	BRCMF_PCIE_DEVICE(BRCM_PCIE_4371_DEVICE_ID),
 	{ /* end: all zeroes */ }
 };
 
@@ -2760,6 +2118,9 @@ MODULE_DEVICE_TABLE(pci, brcmf_pcie_devid_table);
 
 
 static struct pci_driver brcmf_pciedrvr = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,2)
+	.node = {},
+#endif
 	.name = KBUILD_MODNAME,
 	.id_table = brcmf_pcie_devid_table,
 	.probe = brcmf_pcie_probe,

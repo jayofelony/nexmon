@@ -5,9 +5,13 @@
 #ifndef BRCMFMAC_COMMON_H
 #define BRCMFMAC_COMMON_H
 
+#include <linux/version.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/brcmfmac.h>
 #include "fwil_types.h"
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,11,2)
+#define strlcpy(dest,src,len) strscpy(dest,src,len)
+#endif
 
 #define BRCMF_FW_ALTPATH_LEN			256
 
@@ -20,7 +24,7 @@
  */
 
 /**
- * struct brcmf_mp_global_t - Global module parameters.
+ * struct brcmf_mp_global_t - Global module paramaters.
  *
  * @firmware_path: Alternative firmware path.
  */
@@ -31,14 +35,13 @@ struct brcmf_mp_global_t {
 extern struct brcmf_mp_global_t brcmf_mp_global;
 
 /**
- * struct brcmf_mp_device - Device module parameters.
+ * struct brcmf_mp_device - Device module paramaters.
  *
  * @p2p_enable: Legacy P2P0 enable (old wpa_supplicant).
  * @feature_disable: Feature_disable bitmask.
  * @fcmode: FWS flow control.
  * @roamoff: Firmware roaming off?
  * @ignore_probe_fail: Ignore probe failure.
- * @trivial_ccode_map: Assume firmware uses ISO3166 country codes with rev 0
  * @country_codes: If available, pointer to struct for translating country codes
  * @bus: Bus specific platform data. Only SDIO at the mmoment.
  */
@@ -49,13 +52,8 @@ struct brcmf_mp_device {
 	bool		roamoff;
 	bool		iapp;
 	bool		ignore_probe_fail;
-	bool		trivial_ccode_map;
 	struct brcmfmac_pd_cc *country_codes;
 	const char	*board_type;
-	unsigned char	mac[ETH_ALEN];
-	const char	*antenna_sku;
-	const void	*cal_blob;
-	int		cal_size;
 	union {
 		struct brcmfmac_sdio_pd sdio;
 	} bus;
@@ -77,15 +75,6 @@ void brcmf_dmi_probe(struct brcmf_mp_device *settings, u32 chip, u32 chiprev);
 #else
 static inline void
 brcmf_dmi_probe(struct brcmf_mp_device *settings, u32 chip, u32 chiprev) {}
-#endif
-
-#ifdef CONFIG_ACPI
-void brcmf_acpi_probe(struct device *dev, enum brcmf_bus_type bus_type,
-		      struct brcmf_mp_device *settings);
-#else
-static inline void brcmf_acpi_probe(struct device *dev,
-				    enum brcmf_bus_type bus_type,
-				    struct brcmf_mp_device *settings) {}
 #endif
 
 u8 brcmf_map_prio_to_prec(void *cfg, u8 prio);

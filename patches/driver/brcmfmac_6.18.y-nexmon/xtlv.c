@@ -3,8 +3,12 @@
  * Copyright (c) 2019 Broadcom
  */
 
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,11,2)
+#include <asm/unaligned.h>
+#else
 #include <linux/unaligned.h>
-
+#endif
 #include <linux/math.h>
 #include <linux/string.h>
 #include <linux/bug.h>

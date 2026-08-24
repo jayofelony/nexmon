@@ -3,12 +3,18 @@
  * Copyright (c) 2014 Broadcom Corporation
  */
 #ifdef CONFIG_OF
-int brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
-		   struct brcmf_mp_device *settings);
+void brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
+		    struct brcmf_mp_device *settings);
+struct brcmf_firmware_mapping *
+brcmf_of_fwnames(struct device *dev, u32 *map_count);
 #else
-static int brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
-			  struct brcmf_mp_device *settings)
+static void brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
+			   struct brcmf_mp_device *settings)
 {
-	return 0;
+}
+static struct brcmf_firmware_mapping *
+brcmf_of_fwnames(struct device *dev, u32 *map_count)
+{
+	return NULL;
 }
 #endif /* CONFIG_OF */

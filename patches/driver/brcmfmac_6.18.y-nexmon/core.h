@@ -10,13 +10,22 @@
 #ifndef BRCMFMAC_CORE_H
 #define BRCMFMAC_CORE_H
 
+#include <linux/version.h>
+#include <linux/timer.h>
 #include <net/cfg80211.h>
 #include "fweh.h"
 
-#if IS_MODULE(CONFIG_BRCMFMAC)
-#define BRCMF_EXPORT_SYMBOL_GPL(__sym)	EXPORT_SYMBOL_NS_GPL(__sym, "BRCMFMAC")
-#else
-#define BRCMF_EXPORT_SYMBOL_GPL(__sym)
+/* timer_container_of()/timer_delete_sync() replaced from_timer()/
+ * del_timer_sync() in newer kernels; provide the old names on kernels
+ * that predate the rename so callers can just use the new names.
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,16,0)
+#define timer_container_of(var, callback_timer, timer_fieldname) \
+	from_timer(var, callback_timer, timer_fieldname)
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,15,0)
+#define timer_delete_sync(timer) del_timer_sync(timer)
 #endif
 
 #define TOE_TX_CSUM_OL		0x00000001
@@ -48,26 +57,26 @@
 /**
  * struct brcmf_ampdu_rx_reorder - AMPDU receive reorder info
  *
+ * @pktslots: dynamic allocated array for ordering AMPDU packets.
  * @flow_id: AMPDU flow identifier.
  * @cur_idx: last AMPDU index from firmware.
  * @exp_idx: expected next AMPDU index.
  * @max_idx: maximum amount of packets per AMPDU.
  * @pend_pkts: number of packets currently in @pktslots.
- * @pktslots: array for ordering AMPDU packets.
  */
 struct brcmf_ampdu_rx_reorder {
+	struct sk_buff **pktslots;
 	u8 flow_id;
 	u8 cur_idx;
 	u8 exp_idx;
 	u8 max_idx;
 	u8 pend_pkts;
-	struct sk_buff *pktslots[];
 };
 
 /* Forward decls for struct brcmf_pub (see below) */
 struct brcmf_proto;	/* device communication protocol info */
 struct brcmf_fws_info;	/* firmware signalling info */
-struct brcmf_mp_device;	/* module parameters, device specific */
+struct brcmf_mp_device;	/* module paramateres, device specific */
 
 /*
  * struct brcmf_rev_info
@@ -122,7 +131,7 @@ struct brcmf_pub {
 	struct mutex proto_block;
 	unsigned char proto_buf[BRCMF_DCMD_MAXLEN];
 
-	struct brcmf_fweh_info *fweh;
+	struct brcmf_fweh_info fweh;
 
 	struct brcmf_ampdu_rx_reorder
 		*reorder_flows[BRCMF_AMPDU_RX_REORDER_MAXFLOWS];
@@ -142,9 +151,6 @@ struct brcmf_pub {
 	struct work_struct bus_reset;
 
 	u8 clmver[BRCMF_DCMD_SMLEN];
-	u8 sta_mac_idx;
-	const struct brcmf_fwvid_ops *vops;
-	void *vdata;
 };
 
 /* forward declarations */
