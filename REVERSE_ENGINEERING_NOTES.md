@@ -656,9 +656,43 @@ applying that delta to `pkt_buf_get_skb` gave `0x6c30`, which disassembled
 identically. The delta is **not** constant across the whole image - the same
 delta applied to `wl_send` (`0x7fe4` -> `0x88cc`) lands mid-function.
 
+### FIXED: radiotap payload and signal
+
+Both remaining defects are resolved; captures now decode correctly (right
+SSIDs, channel, rates, and realistic RSSI matching `iw scan`).
+
+**Garbage frame body: `memcpy` was resolving to an address that is not memcpy.**
+`wrapper.c` had, for this chip, `AT(CHIP_VER_BCM43430a1, FW_VER_ALL, 0x880B80)`
+plus `AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x2390)`. 7.45.98 matched only
+the `FW_VER_ALL` line, and `0x880B80` is **not** memcpy on this chip - it
+disassembles to a 5-instruction stub that loads one word from a literal pool,
+stores it to `[sp,#4]` and returns. So every `memcpy()` in patch code silently
+did nothing, and `wl_monitor_radiotap`'s frame body copy left uninitialised skb
+memory - which is why frames arrived with all-zero MACs and nonsense types while
+the radiotap fields written directly in C (TSF, channel) were correct.
+Fixed: `memcpy` for `FW_VER_7_45_98` -> `0x24ec` (48-byte signature, unique hit;
+corroborated because the 7.45.98 RAM RX routine itself calls `0x24ec`).
+Note `malloc` carries the *same* bogus `0x880B80` for this chip and is still
+unfixed - it is reached only from `helper.c`'s delayed-task path, not from RX.
+A `FW_VER_ALL` entry being present is not evidence that it is correct.
+
+**Wrong RSSI: a stale object file, not a bad address.** The `WL_RXSTS_NO_PAD`
+layout fix was correct all along but had never actually been compiled in. This
+Makefile does **not track header dependencies**, so editing
+`firmwares/<chip>/structs.common.h` or `<fwver>/structs.h` and re-running `make`
+relinks without recompiling - the build prints `LINKING OBJECTS` with no
+`COMPILING` lines, which is the tell. `wl_monitor_radiotap` was still reading
+`sts->signal` from offset 32 (the padded ROM layout) instead of 30.
+**After any header change in this tree, run `make clean` first.** Verify the
+result in the ELF rather than trusting the build:
+
+    arm-none-eabi-objdump -d --start-address=0x5f990 --stop-address=0x5fa10 \
+        gen/patch.elf | grep -E "r9, #"
+    # r9 holds sts; expect [r9, #8] chanspec and [r9, #30] signal on 7.45.98
+
 ### Still open
 
-1. **Radiotap payload is wrong.** Frames flow and no longer trap, but the
+1. ~~**Radiotap payload is wrong.**~~ FIXED - see above. Frames flow and no longer trap, but the
    decoded contents are garbage: all-zero BSSID/DA/SA, `-1dBm signal`, bogus
    frame types. The `WL_RXSTS_NO_PAD` guess (dropping the 2-byte hole after
    `htflags`) is evidently not the actual 7.45.98 layout. Re-derive it properly

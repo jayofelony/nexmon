@@ -269,6 +269,7 @@ AT(CHIP_VER_BCM4356, FW_VER_ALL, 0x2E5C)
 AT(CHIP_VER_BCM43438, FW_VER_7_45_41_26_r640327, 0x2360)
 AT(CHIP_VER_BCM43430a1, FW_VER_ALL, 0x880B80)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x2390)
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x24ec)      // relocated from FW_VER_7_45_41_46 (0x2390) by byte-signature match (48B, unique hit); corroborated - the 7.45.98 RAM RX routine itself calls 0x24ec. Without this, 7_45_98 fell through to the FW_VER_ALL entry 0x880B80, which is NOT memcpy on this chip (a 5-instruction stub that loads one word and returns), so every memcpy silently did nothing
 AT(CHIP_VER_BCM4330, FW_VER_ALL, 0x809344)
 AT(CHIP_VER_BCM4335b0, FW_VER_ALL, 0x12D20)
 AT(CHIP_VER_BCM43596a0, FW_VER_ALL, 0x1d2c)
