@@ -283,11 +283,22 @@ uses (`BLPatch(flash_patch_179, wl_monitor_hook)` at `0x81F620`) — it must
 install monitor-mode support some other way (a straight RAM `PATCH`
 overwrite instead of a `FLASHPATCH` table entry, most likely, mirroring
 how `wl_send_hook`/`wlc_ioctl_hook` in *this* repo already use `PATCH`
-rather than `FLASHPATCH` for their RAM-resident hook points). The official
-build's `nexmon_ver: 2.2.2-552-gb8c6-2` string (a real upstream seemoo-lab
-version tag) also suggests it may come from a meaningfully different
-source tree than what's vendored into this repo, not just a different
-firmware version built from the same source.
+rather than `FLASHPATCH` for their RAM-resident hook points).
+
+The official build's `nexmon_ver: 2.2.2-552-gb8c6-2` string is a
+`git describe` output (tag `2.2.2`, 552 commits past it, short hash
+`b8c6`) — user-confirmed this is from the actual
+[seemoo-lab/nexmon](https://github.com/seemoo-lab/nexmon) GitHub repo, the
+original upstream project this repo (`jayofelony/nexmon`) was forked from.
+So the working firmware was built directly from upstream source at that
+commit, which is concrete and checkable: `git clone
+https://github.com/seemoo-lab/nexmon`, find the commit matching
+`2.2.2` + 552 commits (`git log --oneline v2.2.2..HEAD | wc -l` style
+search, or `git describe` on candidate commits), and diff its
+`patches/bcm43430a1/7_45_41_46/nexmon/src/monitormode.c` (and
+`patch.c`/`ioctl.c`) against this repo's versions to find exactly where
+they diverged. This is a much more direct path than blind RAM-diffing and
+should be tried first next session.
 
 **Not yet done, would be the decisive next step**: extract the full RAM
 diff between the stock `7_45_41_46` binary and the confirmed-working
@@ -321,11 +332,17 @@ second physical device — everything required is already sitting in
 
 ## TODO — next session, start here
 
-1. **Do the stock-vs-patched RAM diff described above** for `7_45_41_46`
-   against the confirmed-working `firmware-nexmon` build, to find how
-   monitor mode is really installed there and whether the same approach
-   (rather than the `0x81F620` flashpatch) fixes RX on `7_45_98` too. This
-   is the most promising open lead from this session.
+1. **Diff against actual upstream `seemoo-lab/nexmon` first** (see above —
+   the working firmware's `nexmon_ver` string is a real `git describe`
+   from that repo, commit is findable). Compare its
+   `monitormode.c`/`patch.c`/`ioctl.c` for `bcm43430a1` against this repo's
+   to find exactly where they diverged on how monitor mode gets installed.
+   If that's inconclusive or the matching commit can't be pinned down,
+   fall back to a direct stock-vs-patched RAM diff of the confirmed-working
+   `firmware-nexmon` binary (same byte-diff technique used throughout this
+   doc) to find how monitor mode is really wired up there, and whether the
+   same approach (rather than the `0x81F620` flashpatch) fixes RX on
+   `7_45_98` too. This is the most promising open lead from this session.
 2. Apply the same audit-and-fix treatment (wrapper-gap check +
    byte-signature relocation) to other chips/firmware versions:
 - **bcm43436b0** — already has a `rom_extraction` reference implementation
