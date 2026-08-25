@@ -169,11 +169,51 @@ Not yet fixed/explained. `pkt_buf_get_skb` (used by `wl_monitor_radiotap`,
 downstream of the hook) has **no `CHIP_VER_BCM43430a1` entry at all** in
 `wrapper.c` (missing for every firmware version, not just `7_45_98`) — but
 this can't explain the silence since the hook's `printf` runs before that
-call is ever reached. Next step if resumed: trace what actually calls into
-`0x81F620`'s containing function (search the ROM dump for `bl`/`b`
-references to its start address) to check it's really on the live RX path
-for this exact chip revision, rather than assuming from ARM-calling-
-convention shape alone.
+call is ever reached.
+
+**Caller trace attempted, inconclusive.** Correctly identified the function
+containing `0x81F620` starts at `0x81F414` (confirmed via a properly
+instruction-aligned disassembly — a naive `--start-address=0x81f560` cut
+mid-instruction the first time and produced misleading garbage; always
+disassemble from a confirmed boundary, e.g. right after a `b.w`/`bx lr`, and
+slice the region of interest out of one continuous pass, don't restart
+objdump at an arbitrary address inside a Thumb function). Searched the
+*entire* ROM dump and the stock RAM firmware image, both as disassembled
+`bl`/`b.w`/`b.n` targets and as raw little-endian literal bytes (for
+function-pointer/vtable-style indirect calls), for any reference to
+`0x81F414` — zero hits, anywhere. Search method validated against a
+known-good control (`wlc_bmac_read_tsf` at `0x20abc`, found referenced
+twice, exactly as expected) — so the method works, the negative result is
+real.
+
+**But this doesn't prove `0x81F620` is wrong.** Ran the same zero-literal-
+reference check against `wl_monitor` itself (`0x819510`, the ROM function
+nexmon's own `wl_monitor_hook` calls for non-radiotap `MONITOR_IEEE80211`
+mode) — also zero references anywhere in stock code. That's expected: this
+whole class of function is vendor ROM code that stock firmware never calls
+(consumer devices don't expose monitor mode) — nexmon's model is
+specifically to hijack otherwise-dead ROM code via flashpatch redirection,
+so "no static caller found" is the *normal* signature for every nexmon
+monitor-hook target, not evidence specific to this address being wrong. A
+static caller/xref search cannot distinguish "correct hook, naturally
+unreferenced by design" from "wrong address" for this class of patch.
+
+**What would actually be decisive** (not yet done, would need either more
+tooling or a second data point):
+- A real ROM dump from a *different, known-working* BCM43430/1 device
+  running the same nexmon monitor-mode setup, to diff against this chip's
+  `rom.bin` — if `0x81F620`'s neighborhood differs between the two, that's
+  a smoking gun either way. Nobody had this available this session.
+- Proper decompilation (Ghidra + the `armv7-m` processor module) instead of
+  raw `objdump` text-grepping, so real cross-reference analysis (including
+  through indirect/computed dispatch tables, which this ROM uses heavily —
+  see the `blx r7` example near `0x81f3b8`) is possible. `objdump`/manual
+  grepping cannot follow computed jump tables or vtable-style dispatch, and
+  this ROM has plenty of both; that's the real blind spot in this session's
+  method, not the direct-reference search itself.
+- Alternatively, single-step/hardware-trace the actual RX interrupt handler
+  on the live chip (out of scope for what's available here — no JTAG/SWD
+  access set up, only the SDIO-side custom-ioctl memory read/write).
 
 ## TODO (explicit ask from the user): apply this to other chips
 
