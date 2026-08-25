@@ -530,10 +530,72 @@ payload makes the entry look like a meaningless identity patch. It is not — th
 true ROM instruction is simply not recoverable from a live dump. Never diff a
 live ROM dump against a flash-patch payload and conclude "no-op".
 
-**Fix direction**: stop patching ROM `0x81F620` for this version. Disassemble the
-RAM reimplementation at `0xd4e4`, locate its call to `wl_monitor` (ROM
-`0x819510`), and place an ordinary RAM `BLPatch` there under
-`FW_VER_7_45_98` — not `FW_VER_ALL`. More generally, any `FW_VER_ALL` ROM
+**Fix direction** (implemented — see next section): stop patching ROM
+`0x81F620` for this version and hook the RAM reimplementation instead, under
+`FW_VER_7_45_98` rather than `FW_VER_ALL`. More generally, any `FW_VER_ALL` ROM
 flashpatch in this codebase is suspect: it must be re-validated per firmware
 version by checking that no stock flash-patch entry diverts control flow ahead
 of the hooked address.
+
+## The fix for 7.45.98 (commit `310d96dd`) — built and verified in-image, NOT yet hardware-tested
+
+### Finding the correct hook point
+
+Note the RAM routine does **not** call the ROM `wl_monitor` at `0x819510` — a
+scan of the whole RAM image finds no `BL` and no literal reference to it, and a
+scan of ROM finds no caller either (because `0x81F620` *was* the sole caller and
+nexmon had already overwritten it). 7.45.98 ships its own **RAM copy of
+`wl_monitor` at `0xa5e2`**.
+
+The RAM routine's tail is a register-renamed mirror of the ROM one, which is
+what identifies the hook point unambiguously:
+
+    ROM 0x81f61a  ldr r0,[r5,#8] / mov r1,sp / mov r2,r6 / bl wl_monitor  ; 0x81f620
+                  add sp,#56  / ldmia.w sp!,{r4-r8,pc}
+    RAM 0x00d710  ldr r0,[r6,#8] / mov r1,sp / mov r2,r8 / bl 0xa5e2      ; 0x00d716
+                  add sp,#64  / ldmia.w sp!,{r4-r8,pc}
+
+(The argument registers are permuted between the two builds: ROM has
+`r5`=wlc/`r6`=p, RAM has `r6`=wlc/`r8`=p. `&sts` is `sp` in both.) The RAM
+function has exactly one exit, at `0xd71a`, so `0xd716` is the only call site to
+patch.
+
+Three changes:
+
+1. `patches/bcm43430a1/7_45_98/nexmon/src/monitormode.c` — replaced the dead
+   `at(0x81F620, "flashpatch", …, FW_VER_ALL)` with
+   `at(0xd716, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)`. RAM address ⇒ plain
+   patch region `""`, not `"flashpatch"`.
+2. `patches/common/wrapper.c` — added
+   `AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0xa5e2)` for `wl_monitor`, ahead of
+   the existing `FW_VER_ALL, 0x819510` line (needed by the `MONITOR_IEEE80211`
+   case, which calls `wl_monitor` directly).
+3. **`struct wl_rxsts` layout differs in this version** and had to be fixed too,
+   or frames would flow but carry garbage radiotap metadata. The RAM routine
+   omits the 2-byte hole after `htflags`; the struct is already
+   `__attribute__((packed))`, so everything from `antenna` on sits 2 bytes
+   lower. Confirmed by matching five independent field stores between the two
+   routines (ROM offset → RAM offset): `16→14` (antenna), `20→18` (pktlength),
+   `24→22` (mactime), `28→26` (sq), `32→30` (signal), `40→38` (preamble),
+   `48→46` (nfrmtype); offsets `≤13` (chanspec/datarate/mcs/htflags) unchanged.
+   The unaligned `str.w [sp,#22]`/`[sp,#14]`/`[sp,#30]` stores in the RAM
+   disassembly are the tell. Implemented as a `WL_RXSTS_NO_PAD` guard around
+   the `uint16 PAD` in `firmwares/bcm43430a1/structs.common.h`, defined by
+   `firmwares/bcm43430a1/7_45_98/structs.h` before it includes the common file,
+   so other chips/versions are untouched.
+
+### Verified in the built image (not on hardware)
+
+- `bl_wl_monitor_ram_call` placed at `0xd716`; the 4 bytes there decode to
+  `BL 0x5fa98` = `wl_monitor_hook` (`nm` on `gen/patch.elf` agrees).
+- Epilogue bytes at `0xd71a` (`10b0 bde8 f081`) intact — exactly the 4-byte `BL`
+  was replaced, nothing else.
+- `wl_monitor` now resolves to `0xa5e2`; no `0x81F620` entry remains in the
+  flash-patch table.
+
+**Still to do**: power-cycle the device and confirm the hook actually fires. The
+debug `printf` in `wl_monitor_hook` (commit `d6feca9b`) is still in place, so a
+single `tcpdump` run on a channel with real traffic will show it immediately in
+`dmesg` as a `brcmfmac: CONSOLE:` line (needs `modprobe brcmfmac debug=0x100000`
+— see the console-readback recipe above). If frames flow but radiotap fields
+look wrong, re-check the `wl_rxsts` offsets before suspecting anything else.
