@@ -68,6 +68,11 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
             }
             break;
 
+        case 600: // raw memory read: arg[0:4] holds source address, returns len bytes from *addr
+            memcpy(arg, *(char **) arg, len);
+            ret = IOCTL_SUCCESS;
+            break;
+
         case 500: // dump wlif list
             {
                 struct wlc_if *wlcif = wlc->wlcif_list;
