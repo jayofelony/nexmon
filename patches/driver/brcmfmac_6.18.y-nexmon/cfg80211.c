@@ -7759,6 +7759,9 @@ struct brcmf_cfg80211_info *brcmf_cfg80211_attach(struct brcmf_pub *drvr,
 		goto priv_out;
 	}
 	cfg->d11inf.io_type = (u8)io_type;
+	brcmf_err("DEBUG: BRCMF_C_GET_VERSION raw io_type=%d (0x%x), truncated=%u (D11N=%d D11AC=%d)\n",
+		  io_type, io_type, cfg->d11inf.io_type,
+		  BRCMU_D11N_IOTYPE, BRCMU_D11AC_IOTYPE);
 	brcmu_d11_attach(&cfg->d11inf);
 
 	/* regulatory notifer below needs access to cfg so
