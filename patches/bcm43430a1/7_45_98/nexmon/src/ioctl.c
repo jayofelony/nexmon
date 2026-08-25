@@ -94,6 +94,17 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
             }
             break;
 
+        case 604: // dump live D11 core registers: maccontrol, maccommand, macintstatus, macintmask (16 bytes)
+            if (len >= 16) {
+                unsigned int *out = (unsigned int *) arg;
+                out[0] = wlc->regs->maccontrol;
+                out[1] = wlc->regs->maccommand;
+                out[2] = wlc->regs->macintstatus;
+                out[3] = wlc->regs->macintmask;
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
         case 500: // dump wlif list
             {
                 struct wlc_if *wlcif = wlc->wlcif_list;

@@ -482,3 +482,58 @@ nearest known-good same-chip firmware version, (4) where no same-chip
 reference address exists at all (like `pkt_buf_get_skb` here), extract the
 live ROM via the `case 603` ioctl technique and either disassemble by hand
 or trace via a caller that *is* correctly resolved.
+
+## SOLVED: why 7.45.98 never receives RX in monitor mode but 7.45.41.46 does
+
+Determined entirely offline from the stock firmware images — no device needed.
+
+`monitormode.c` hooks **ROM** address `0x81F620` with `FW_VER_ALL`:
+
+    __attribute__((at(0x81F620, "flashpatch", CHIP_VER_BCM43430a1, FW_VER_ALL)))
+    BLPatch(flash_patch_179, wl_monitor_hook);
+
+`FW_VER_ALL` is the bug. ROM is identical silicon across versions, but whether
+that ROM code still *executes* is version-specific, because each stock firmware
+ships its own flash-patch table that relocates ROM routines into RAM.
+
+Comparing stock tables (`FP_CONFIG_ORIGBASE 0x1800`, 12-byte entries; sizes from
+`FP_CONFIG_ORIGEND`: 41.46 = 183 entries, 7.45.98 = 212 — the extra 29 are extra
+ROM→RAM relocations), in the window `0x81e000..0x81f620`:
+
+- 7.45.41.46: one entry at `0x81ee08` (before the hook region)
+- 7.45.98:   one entry at **`0x81f410`**
+
+`0x81f410`'s replacement decodes to an unconditional **`B.W` to RAM `0xd4e4`**,
+and `0xd4e4` contains a genuine prologue (`2de9f041` = `push.w {r4-r8,lr}`).
+Cypress reimplemented that ROM routine in RAM for 7.45.98. Execution therefore
+leaves ROM `0x210` bytes *before* `0x81F620`, so the nexmon hook is dead code —
+never reached. 41.46 has no such diversion, so ROM runs through `0x81F620` and
+the hook fires. This exactly matches the observed symptom (hook printf never
+appears, no crash, zero frames).
+
+Ruled out along the way, all verified rather than assumed:
+
+- The built flash-patch table is byte-perfect: all 212 stock entries present
+  with identical payloads, plus ours prepended at index 0 (`FP_CONFIG_BASE`
+  `0x617f0`, 213 entries, both BASE/END pointer pairs updated). The earlier
+  "table ordering differs from the working build" theory is therefore **not**
+  the cause of the RX silence — retracted.
+- Our `BL` payload at `0x81F620` is well-formed and targets `0x5FA98`.
+- Wrapper addresses and the driver are not implicated (see prior section: the
+  reference driver + reference 41.46 firmware also captured nothing, and plain
+  managed-mode scanning works fine).
+
+**Gotcha that hid this for so long**: `firmwares/bcm43430a1/7_45_98/rom.bin` is a
+*live* dump taken through the TCAM on a running chip, so it already shows the
+patched `B.W` at `0x81f410`. Comparing that "ROM" against the stock patch
+payload makes the entry look like a meaningless identity patch. It is not — the
+true ROM instruction is simply not recoverable from a live dump. Never diff a
+live ROM dump against a flash-patch payload and conclude "no-op".
+
+**Fix direction**: stop patching ROM `0x81F620` for this version. Disassemble the
+RAM reimplementation at `0xd4e4`, locate its call to `wl_monitor` (ROM
+`0x819510`), and place an ordinary RAM `BLPatch` there under
+`FW_VER_7_45_98` — not `FW_VER_ALL`. More generally, any `FW_VER_ALL` ROM
+flashpatch in this codebase is suspect: it must be re-validated per firmware
+version by checking that no stock flash-patch entry diverts control flow ahead
+of the hooked address.
