@@ -110,5 +110,23 @@ wl_monitor_hook(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p) {
     }
 }
 
-__attribute__((at(0x81F620, "flashpatch", CHIP_VER_BCM43430a1, FW_VER_ALL)))
-BLPatch(flash_patch_179, wl_monitor_hook);
+/* 7.45.98 does NOT execute the ROM RX routine that older firmware versions do.
+ * The stock flash-patch table for this version contains an entry at 0x81f410 -
+ * the entry point of the ROM function spanning 0x81f410..0x81f626 - replacing
+ * its prologue with an unconditional "b.w 0xd4e4" into a RAM reimplementation.
+ * That ROM function's only exit is the tail call to wl_monitor at 0x81F620, so
+ * flashpatching 0x81F620 (as FW_VER_ALL does, and as works fine on 7.45.41.46,
+ * whose stock table has no such diversion) patches code that never runs: the
+ * hook is silently dead and monitor mode captures nothing.
+ *
+ * The RAM reimplementation at 0xd4e4 mirrors the ROM function exactly and ends
+ * in the same tail call, against a RAM copy of wl_monitor at 0xa5e2:
+ *
+ *   ROM 0x81f61a  ldr r0,[r5,#8] / mov r1,sp / mov r2,r6 / bl wl_monitor
+ *   RAM 0x00d710  ldr r0,[r6,#8] / mov r1,sp / mov r2,r8 / bl 0xa5e2
+ *
+ * so the correct hook point for this firmware is the RAM call site at 0xd716.
+ * This is an ordinary RAM patch, not a flashpatch.
+ */
+__attribute__((at(0xd716, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)))
+BLPatch(wl_monitor_ram_call, wl_monitor_hook);

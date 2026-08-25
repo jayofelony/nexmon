@@ -47,6 +47,7 @@
 #define	PAD		_XSTR(__LINE__)
 #endif
 
+#define WL_RXSTS_NO_PAD 1
 #include "../structs.common.h"
 
 #endif /*STRUCTS_H */

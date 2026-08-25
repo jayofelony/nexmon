@@ -955,6 +955,10 @@ VOID_DUMMY
 AT(CHIP_VER_BCM4358, FW_VER_ALL, 0x18628)
 AT(CHIP_VER_BCM4356, FW_VER_7_35_101_5_sta, 0x199112)
 AT(CHIP_VER_BCM43438, FW_VER_ALL, 0x819510)
+// 7.45.98 bypasses the ROM copy at 0x819510 (its stock flash-patch table
+// redirects the enclosing ROM RX routine into RAM at 0xd4e4); the live copy
+// this version actually calls is the RAM one at 0xa5e2.
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0xa5e2)
 AT(CHIP_VER_BCM43430a1, FW_VER_ALL, 0x819510)
 AT(CHIP_VER_BCM4339, FW_VER_ALL, 0x270F0)
 AT(CHIP_VER_BCM4330, FW_VER_ALL, 0x817ACC)
