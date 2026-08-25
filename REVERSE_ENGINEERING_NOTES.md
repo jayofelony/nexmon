@@ -599,3 +599,73 @@ single `tcpdump` run on a channel with real traffic will show it immediately in
 `dmesg` as a `brcmfmac: CONSOLE:` line (needs `modprobe brcmfmac debug=0x100000`
 — see the console-readback recipe above). If frames flow but radiotap fields
 look wrong, re-check the `wl_rxsts` offsets before suspecting anything else.
+
+## CONFIRMED ON HARDWARE: monitor-mode RX works on 7.45.98
+
+The RAM-hook fix is verified on the device. `wl_monitor_hook: called, monitor=2`
+now appears repeatedly in the firmware console during a capture, and `tcpdump`
+on `wlan0mon` returns frames — the first frames this port has ever captured.
+The trap stack even showed `sp+44 0000d71b`, i.e. the return address into the
+new `BL` at `0xd716`, confirming the call path.
+
+### Second bug, found immediately after the hook started firing
+
+With the hook live, the first capture trapped:
+
+    TRAP 3(6fdc8): pc 5d0f8, lr 5f9ab, sp 6fe1c
+
+`lr 0x5f9ab` -> return address `0x5f9aa`, which disassembles to the instruction
+right after `wl_monitor_radiotap`'s *first* call:
+
+    5f9a6:  bl 5d0b8 <pkt_buf_get_skb>
+    5f9aa:  mov r5, r0
+
+`pkt_buf_get_skb` had `FW_VER_7_45_41_46` but no `FW_VER_7_45_98` entry, so it
+compiled as a local stub at `0x5d0b8` and execution ran off into `0x5d0f8` -
+the same silently-missing-wrapper pattern as before, one layer deeper. TRAP 3
+is a prefetch abort, i.e. executing an invalid address, which is the signature
+of jumping into a dummy stub.
+
+Fixed: `pkt_buf_get_skb` -> `0x6c30`, `pkt_buf_free_skb` -> `0x6c74`.
+
+### Audit method that finds all of these at once (do this instead of one crash at a time)
+
+    grep -iE "DUMMY" gen/nexmon.pre | awk '{print $NF}' | sort -u > /tmp/resolved
+    arm-none-eabi-nm gen/patch.elf | awk '$2=="W"{print $3, $1}' | sort |
+      while read -r sym addr; do
+        grep -qx "$sym" /tmp/resolved || echo "$sym -> stub at 0x$addr"
+      done
+
+Ignore the `b_flash_patch_*` hits - those are stock ROM flashpatch definitions,
+not wrappers, and their addresses are genuine. On this port the audit reported
+exactly three real gaps: `pkt_buf_get_skb`, `pkt_buf_free_skb`, `wl_send`.
+
+### Important limitation of the byte-signature relocation method
+
+Byte-signature matching **fails on functions containing relative branches**,
+because `BL`/`B.W` encode a PC-relative offset that changes with the function's
+address. `pkt_buf_get_skb` is identical between 41.46 and 7.45.98
+instruction-for-instruction, including the same ROM callee `0x808744`, yet has
+*zero* byte matches - the two `BL`s encode as `f002 d9f9` vs `f001 dd85`.
+
+When a signature search returns no hits, do not conclude the function is gone.
+Instead: locate a neighbouring function that *does* match, apply the same delta
+as a candidate, and verify by disassembling both and comparing instructions.
+`pkt_buf_free_skb` matched at 32 bytes (`0x638C` -> `0x6c74`, delta `0x8E8`);
+applying that delta to `pkt_buf_get_skb` gave `0x6c30`, which disassembled
+identically. The delta is **not** constant across the whole image - the same
+delta applied to `wl_send` (`0x7fe4` -> `0x88cc`) lands mid-function.
+
+### Still open
+
+1. **Radiotap payload is wrong.** Frames flow and no longer trap, but the
+   decoded contents are garbage: all-zero BSSID/DA/SA, `-1dBm signal`, bogus
+   frame types. The `WL_RXSTS_NO_PAD` guess (dropping the 2-byte hole after
+   `htflags`) is evidently not the actual 7.45.98 layout. Re-derive it properly
+   from the RAM routine's stores at `0xd4e4..0xd71a` rather than by inference,
+   and cross-check against what `wl_monitor_radiotap` reads.
+2. **`wl_send` is still an unresolved stub** (`0x5d0c0`). It was restructured in
+   7.45.98 - neither its prologue nor its body matches anything in the image, and
+   none of the 25 `stmdb sp!,{r0,r1,r2,r4-fp,lr}` prologue candidates disassemble
+   like it. It is only reached from `injection.c`'s `wl_send_hook`, so it does not
+   affect RX, but frame injection through that hook will trap until it is found.
