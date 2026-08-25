@@ -703,3 +703,42 @@ result in the ELF rather than trusting the build:
    none of the 25 `stmdb sp!,{r0,r1,r2,r4-fp,lr}` prologue candidates disassemble
    like it. It is only reached from `injection.c`'s `wl_send_hook`, so it does not
    affect RX, but frame injection through that hook will trap until it is found.
+
+
+## Session end state (2026-08-26): RX + injection working, channel hopping is the open issue
+
+Working and verified on hardware:
+- Monitor-mode RX decodes correctly (right SSIDs, channel, rates, realistic RSSI).
+- pwnagotchi recon works end to end - real APs, real clients, vendor IDs.
+- Injection no longer jams. After the `wl_send` fix (`6d691a9a`) bettercap logged
+  **zero** "could not inject WiFi packet / Resource temporarily unavailable"
+  errors, where before it produced them continuously.
+- The wrapper audit is clean: no unresolved wrappers remain on this port.
+
+**Open issue - `brcmf_cfg80211_nexmon_set_channel` times out (`-110`).**
+Symptoms: repeated `Set Channel failed: chspec=NNNN, -110 (attempt 1..3/3)` in
+dmesg, and bettercap `error while hopping to channel 6: iw: command failed:
+Connection timed out (-110)`. Seen across many chanspecs (`0x1001` ch1,
+`0x1002` ch2, `0x1006` ch6, `0x1009` ch9), so it is not channel-specific. When
+it is failing, `tcpdump` on `wlan0mon` also returns 0 packets - the radio is
+parked/unresponsive rather than hopping.
+
+Important: this **predates** the `wl_send` fix (first observed while the TX
+queue was still jammed) and persists after it, so it is a separate defect, not
+a regression from it. Not yet established whether it is:
+  (a) firmware-side - the nexmon `set_channel` ioctl path failing/blocking on
+      7.45.98, possibly another wrong or missing address on that path;
+  (b) driver-side - `brcmf_cfg80211_nexmon_set_channel` in
+      `patches/driver/brcmfmac_6.18.y-nexmon/cfg80211.c`, its retry loop and
+      timeout; or
+  (c) a consequence of sustained RX load through the new hook.
+
+**Next session, start here.** The isolation test was set up but not run: stop
+`pwnagotchi` and `bettercap` so nothing else touches the radio, then check
+whether the firmware answers simple ioctls at all (`nexutil -Iwlan0mon -m`) and
+whether a manual `iw dev wlan0mon set channel N` succeeds. That distinguishes
+"firmware wedged/unresponsive generally" from "set_channel specifically broken"
+from "only breaks under bettercap's hop rate". Compare against 41.46, which is
+known to hop correctly on this hardware - if 41.46 hops fine with the same
+driver, the fault is firmware-side and the `set_channel` ioctl path on 7.45.98
+should get the same wrapper-address scrutiny that fixed RX.
