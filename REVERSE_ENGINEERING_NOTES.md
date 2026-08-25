@@ -344,25 +344,117 @@ this repo's build tooling, try it and see if the crash goes away.
   any of the above reboots — re-transfer before every retest, don't assume
   a previous `scp` is still there.
 
+## Decisive finding: `wl_monitor_hook` itself never fires — the RX failure is upstream in firmware, not in the driver or the wrapper addresses
+
+This supersedes the "caller trace attempted, inconclusive" section above with
+an actual answer, and rules out the flash-patch-table-ordering theory as the
+proximate cause of the RX silence (it may still explain the *separate*
+`7_45_41_46` CLM crash, but not this).
+
+**Test setup**: added an unconditional `printf("wl_monitor_hook: called,
+monitor=%d\n", ...)` at the top of `wl_monitor_hook` in
+`patches/bcm43430a1/7_45_98/nexmon/src/monitormode.c` (commit `d6feca9b`),
+rebuilt `7_45_98` firmware from this repo's current `Debug` branch source
+(includes the byte-signature-relocated wrapper fixes from commit
+`d12879ab`), rebuilt the driver via DKMS directly on the Pi (see gotcha
+below about the driver `Makefile`'s `NEXMON_ROOT`-based include paths not
+being portable to a DKMS build tree), installed the confirmed-known-good CLM
+blob (md5 `9ff46519b8b8c2cab323322c9d983873`, extracted fresh from
+`firmware-nexmon_0.2_all.deb` on the Pi — the earlier extraction in `/tmp`
+does not survive a power cycle, `/tmp` is wiped every time), and enabled
+firmware console log forwarding to `dmesg` via the `brcmfmac` driver's
+`debug` module param (`modprobe brcmfmac debug=0x100000`, i.e. the
+`BRCMF_FWCON_VAL` bit — this requires `CONFIG_DYNAMIC_DEBUG` NOT gating
+`pr_debug`, which is the case on this Pi kernel; `/sys/kernel/debug/dynamic_debug/control`
+doesn't even exist here, so `pr_debug` compiles as a plain `printk` given
+this driver's `-DDEBUG` build flag).
+
+Confirmed working end-to-end: booted cleanly (`nexmon_ver: 61c1-dirty-1`,
+version string `7.45.98 (TOB) (56df937 CY) (Nexmon)`), no CLM crash, and
+real firmware boot-time log lines (`Decompressing ucode...`,
+`wlc_channels_commit`, `TCAM: 256 used: 212`, etc.) visibly forwarded to
+`dmesg` as `brcmfmac: CONSOLE: ...` lines — proving the console-readback
+path itself works and isn't a false negative.
+
+Then: brought up `wlan0mon` (type monitor), set channel 6 (confirmed via
+`iw dev wlan0 scan` to have multiple real, actively-beaconing APs in range —
+`Jachtkamp18` etc., beacon interval 100ms, so ~150 beacons expected in a
+15s window at minimum), ran `tcpdump -i wlan0mon` for 15 seconds. Result:
+**0 packets captured, and zero new `CONSOLE:` lines of any kind** — not just
+no `wl_monitor_hook: called` line, but no firmware console output *at all*
+after the initial boot burst, in this or a subsequent 20s idle-window
+control check. Since this firmware only prints what patch code explicitly
+calls `printf()` for, this is *consistent* with — not contradictory to —
+the hook simply never being reached; it's not proof of a broken console-poll
+path (that was independently confirmed working via the boot-time messages).
+
+**Conclusion**: RX frames are not reaching `wl_monitor_hook` at all in
+monitor mode on this firmware/device, even with strong, active, real 802.11
+traffic in range on the tuned channel. This means the bug is **upstream of
+the flashpatch hook** — most likely the D11 MAC's hardware receive path
+itself isn't delivering frames up into `wl`'s software RX callback chain
+while in monitor state (interrupt mask, RX FIFO enable, or promiscuous/BSS
+filter configuration at the hardware level), rather than anything about
+*which* function the flashpatch redirects to or where wrapped addresses
+point. The flash-patch-table-ordering divergence found earlier is probably
+a red herring for this specific issue (it's a plausible lead for the
+*separate* `7_45_41_46` CLM-load crash, which is a different failure mode
+entirely — crash-on-load vs. silent-no-op).
+
+**Also confirmed this session, ruling out driver/firmware-*version*
+mismatch as the cause**: tested the confirmed-genuine reference firmware
+binary (`cyfmac43430-sdio.bin`, md5 `59038e366d9389478e466e225c21bda1`,
+extracted straight from the working `firmware-nexmon` package, i.e. not
+rebuilt by this repo at all) together with this repo's own driver — also
+0 packets on the correct channel. And separately, `wlan0` in plain managed
+mode does a completely normal full scan and receives detailed beacon IEs
+from all nearby APs without issue, proving the RF front end, SDIO bus, and
+chip itself are all healthy — this is a monitor-mode-specific RX path
+failure, not a hardware problem with this unit.
+
+**Practical gotcha hit getting the debug console readback working**: the
+driver's `Makefile` (`patches/driver/brcmfmac_6.18.y-nexmon/Makefile`) uses
+`-I$(NEXMON_ROOT)/patches/driver/brcmfmac_6.18.y-nexmon[/include]` for its
+`ccflags-y`, which only resolves inside this repo's own tree with
+`NEXMON_ROOT` exported (e.g. via `source setup_env.sh`). A DKMS build tree
+on the target device (`/usr/src/brcmfmac-nexmon-<ver>/`) is a flat copy with
+no such env var and no matching directory structure, so building via
+`dkms install` fails with `fatal error: defs.h: No such file or directory`
+etc. Fix: use portable `-I$(src)` / `-I$(src)/include` instead — these are
+the standard kbuild variables that always point at the module's own build
+directory regardless of how/where it's invoked from.
+
 ## TODO — next session, start here
 
-1. **Already done, don't repeat**: identified the working firmware's exact
-   source commit (`b8c6999a`, already in this repo's own history — no
-   external clone needed) and confirmed via `git diff` that
-   `patches/bcm43430a1/7_45_41_46/` source is byte-identical to current
-   `Debug` except two trivial, already-understood diffs. Also confirmed
-   (after fixing an off-by-one table-offset bug) that the working binary
-   *does* use the same `0x81F620` flashpatch as this repo, just placed as
-   table entry 0 (prepended) instead of this repo's build output which
-   appends it last. **Next**: chase *why* identical source produces
-   different flash-patch table ordering — see the "real, narrowed-down
-   lead" paragraph above for concrete candidates (compiler plugin version,
-   toolchain version). A local x86_64 build attempt of the historical
+1. **New top priority**: figure out why frames never reach `wl_monitor_hook`
+   in monitor mode despite real traffic in range and a healthy RF path (see
+   decisive-finding section above). This is now a firmware D11/MAC RX-path
+   investigation, not a wrapper-address or driver-delivery one. Promising
+   next steps: (a) check D11 core interrupt-enable and RX-FIFO-enable
+   registers live (via the `case 603` memory-read ioctl) before/after
+   `SET_MONITOR`, comparing against what stock/managed mode sets, to see if
+   monitor mode is actually opening the hardware receive path; (b) check
+   whether `wlc_monitor` or a similar higher-level "enable monitor" routine
+   in ROM is itself being reached — add another `printf` earlier in the
+   call chain (e.g. in whatever sets `wl->wlc->monitor`) to narrow down how
+   far the RX-enable path actually gets; (c) compare live D11 register state
+   between this chip and — if ever obtainable — a chip confirmed to
+   correctly RX in monitor mode, since a config register diff would be far
+   more conclusive than more disassembly.
+2. Still open, lower priority now: chase *why* identical
+   `patches/bcm43430a1/7_45_41_46/` source (byte-identical to this repo's
+   `Debug` branch, confirmed via `git diff` against historical commit
+   `b8c6999a`) produces a different flash-patch table entry ordering
+   (prepended vs. appended) between this repo's build and the known-working
+   reference build — candidates are compiler plugin version or toolchain
+   version. This is likely relevant to the *separate*, still-unexplained
+   `7_45_41_46` + known-good-CLM crash-on-load bug, not the monitor-mode RX
+   silence (see above). A local x86_64 build attempt of the historical
    commit hit a 32-bit/64-bit plugin mismatch; either fix that (rebuild
    `gcc-nexmon-plugin` as 32-bit to match the pinned 2016 cross-toolchain)
    or just build on the Pi's aarch64 toolchain, which already works fine
    for everything else this session.
-2. Apply the same audit-and-fix treatment (wrapper-gap check +
+3. Apply the same audit-and-fix treatment (wrapper-gap check +
    byte-signature relocation) to other chips/firmware versions:
 - **bcm43436b0** — already has a `rom_extraction` reference implementation
   at `patches/bcm43436b0/9_88_4_65/rom_extraction/` (a full separate
