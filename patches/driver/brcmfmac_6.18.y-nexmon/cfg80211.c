@@ -19,6 +19,7 @@
 #include <uapi/linux/if_arp.h>
 
 #include <brcmu_utils.h>
+#include <brcm_hw_ids.h>
 #include <defs.h>
 #include <brcmu_wifi.h>
 #include "core.h"
@@ -7758,10 +7759,22 @@ struct brcmf_cfg80211_info *brcmf_cfg80211_attach(struct brcmf_pub *drvr,
 		bphy_err(drvr, "Failed to get D11 version (%d)\n", err);
 		goto priv_out;
 	}
+	/* BCM43430 firmware self-reports io_type=BRCMU_D11AC_IOTYPE via
+	 * BRCMF_C_GET_VERSION despite being an 802.11n-only, 2.4GHz-only
+	 * part whose firmware actually validates chanspecs against the
+	 * legacy D11N bit layout. Trusting the self-reported io_type wires
+	 * brcmu_d11_attach() up with the D11AC chanspec encoder, which
+	 * produces well-formed D11AC chanspecs (e.g. channel 6/20MHz/2.4GHz
+	 * encodes as 0x1006) that the firmware's D11N-based validator then
+	 * rejects outright ("invalid chanspec 0x1006", BCME_BADCHAN) since
+	 * under D11N field boundaries the same bits decode as band=5GHz
+	 * with undefined sideband/bandwidth values. Force D11N for this
+	 * chip so encoded chanspecs actually match what the firmware
+	 * expects.
+	 */
+	if (drvr->bus_if->chip == BRCM_CC_43430_CHIP_ID)
+		io_type = BRCMU_D11N_IOTYPE;
 	cfg->d11inf.io_type = (u8)io_type;
-	brcmf_err("DEBUG: BRCMF_C_GET_VERSION raw io_type=%d (0x%x), truncated=%u (D11N=%d D11AC=%d)\n",
-		  io_type, io_type, cfg->d11inf.io_type,
-		  BRCMU_D11N_IOTYPE, BRCMU_D11AC_IOTYPE);
 	brcmu_d11_attach(&cfg->d11inf);
 
 	/* regulatory notifer below needs access to cfg so
