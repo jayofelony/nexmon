@@ -200,7 +200,7 @@ ifneq ("$(wildcard $(DRIVER_FOLDER_NAME)/brcmfmac.ko)", "")
 	done
 	$(Q)modprobe brcmutil
 	@printf "\033[0;31m  RELOADING\033[0m brcmfmac\n"
-	$(Q)insmod $(DRIVER_FOLDER_NAME)/brcmfmac.ko debug=0x100006
+	$(Q)insmod $(DRIVER_FOLDER_NAME)/brcmfmac.ko debug=0x131016
 else
 	$(warning Warning: Driver not compiled)
 endif
