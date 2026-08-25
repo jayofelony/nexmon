@@ -68,9 +68,30 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
             }
             break;
 
-        case 600: // raw memory read: arg[0:4] holds source address, returns len bytes from *addr
+        case 600: // raw memory read via ROM memcpy: arg[0:4] holds source address, returns len bytes from *addr
             memcpy(arg, *(char **) arg, len);
             ret = IOCTL_SUCCESS;
+            break;
+
+        case 601: // sanity: unconditionally write a known constant into arg
+            ((unsigned int *) arg)[0] = 0xDEADBEEF;
+            ret = IOCTL_SUCCESS;
+            break;
+
+        case 602: // sanity: read-modify-write arg itself, no external memory touched
+            ((unsigned int *) arg)[0] = ((unsigned int *) arg)[0] + 1;
+            ret = IOCTL_SUCCESS;
+            break;
+
+        case 603: // raw memory read via manual byte loop, no ROM memcpy dependency
+            {
+                volatile unsigned char *src = *(unsigned char **) arg;
+                volatile unsigned char *dst = (unsigned char *) arg;
+                int i;
+                for (i = 0; i < len; i++)
+                    dst[i] = src[i];
+                ret = IOCTL_SUCCESS;
+            }
             break;
 
         case 500: // dump wlif list
