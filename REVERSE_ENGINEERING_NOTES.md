@@ -269,48 +269,62 @@ transient wedge, not the CLM blob's fault (proven good elsewhere), not the
 missing-wrapper pattern (this build has none). It's specific to how this
 repo's `7_45_41_46` nexmon source interacts with CLM loading.
 
-**Structural difference found that may explain it**: dumped the flash-patch
-table from the confirmed-working `cyfmac43430-sdio.bin` (same technique as
-above — find the stock table at file offset `0x1800`, the relocated one at
-`0x5aebc` for this binary) and diffed it against the *stock* (unpatched)
-reference firmware's table. Stock has 197 entries; the working patched
-binary's relocated table has only **183**, and critically, **every single
-one of those 183 is a member of the original 197** — nothing new was
-appended, `0x81F620` does not appear anywhere in it. In other words: the
-officially-working firmware's monitor-mode patch does **not** go through
-the flashpatch-table-append mechanism that this repo's `monitormode.c`
-uses (`BLPatch(flash_patch_179, wl_monitor_hook)` at `0x81F620`) — it must
-install monitor-mode support some other way (a straight RAM `PATCH`
-overwrite instead of a `FLASHPATCH` table entry, most likely, mirroring
-how `wl_send_hook`/`wlc_ioctl_hook` in *this* repo already use `PATCH`
-rather than `FLASHPATCH` for their RAM-resident hook points).
+**Corrected finding** (an earlier pass at this got the table location
+wrong by exactly one entry — 12 bytes — and concluded the working binary
+had no custom flash-patch entry at all; that was a parsing bug, not a real
+finding, documented here so it isn't repeated). The real relocated table
+starts at file offset `0x5aeb0`, not `0x5aebc` as first assumed
+(`0x5aebc` is actually entry *1*, not entry 0). Entry 0 is:
+```
+0x5aeb0: orig=0x81f620 size=0x4 slot=0x1000
+```
+**This is exactly `wl_monitor_hook`'s flashpatch** — same original address,
+same format, as this repo's `monitormode.c` produces. So the working
+firmware *does* use the identical `0x81F620` flashpatch mechanism. The
+"different patch mechanism" theory is wrong; retracted.
 
-The official build's `nexmon_ver: 2.2.2-552-gb8c6-2` string is a
-`git describe` output (tag `2.2.2`, 552 commits past it, short hash
-`b8c6`) — user-confirmed this is from the actual
-[seemoo-lab/nexmon](https://github.com/seemoo-lab/nexmon) GitHub repo, the
-original upstream project this repo (`jayofelony/nexmon`) was forked from.
-So the working firmware was built directly from upstream source at that
-commit, which is concrete and checkable: `git clone
-https://github.com/seemoo-lab/nexmon`, find the commit matching
-`2.2.2` + 552 commits (`git log --oneline v2.2.2..HEAD | wc -l` style
-search, or `git describe` on candidate commits), and diff its
-`patches/bcm43430a1/7_45_41_46/nexmon/src/monitormode.c` (and
-`patch.c`/`ioctl.c`) against this repo's versions to find exactly where
-they diverged. This is a much more direct path than blind RAM-diffing and
-should be tried first next session.
+**What's actually different, confirmed by identical-source diff**: `git
+diff b8c6999a..Debug -- patches/bcm43430a1/7_45_41_46/` (that commit is
+this repo's own history — its short hash, `b8c6`, matches the working
+firmware's `nexmon_ver: 2.2.2-552-gb8c6-2` exactly, and it's the *only*
+commit in the whole repo with that prefix) shows **only two trivial
+diffs**: the `rm -rf`-CLM-blob-on-install lines we already removed this
+session, and a cosmetic `" (Nexmon)"` string suffix. `monitormode.c`,
+`ioctl.c`, `patch.c`, `sendframe.c`, `injection.c`, `definitions.mk` are
+all byte-identical. So the source this repo has for `7_45_41_46` is (and
+was, at the point matching the working firmware) exactly what built the
+working firmware — yet **the compiled output differs**: the working
+firmware's table has `0x81F620` as entry 0, *prepended* before all 183
+stock entries; this repo's own build (confirmed via `gen/nexmon.pre`,
+captured earlier this session) appends it as entry 184, *last*, after
+every stock entry — same as the `7_45_98` build's entry-213-of-213
+placement pattern documented above.
 
-**Not yet done, would be the decisive next step**: extract the full RAM
-diff between the stock `7_45_41_46` binary and the confirmed-working
-patched one (same `python3` byte-diff approach used throughout this doc),
-locate whatever *does* redirect execution toward monitor-mode delivery in
-the working build (there will be a modified `bl`/`b` instruction at some
-RAM address, findable by diffing stock vs. patched RAM content directly —
-much easier than the ROM-side blind caller search that came up empty
-earlier), and compare that against what this repo's `monitormode.c`/
-`0x81F620` does. This is very likely the actual fix, and it doesn't need a
-second physical device — everything required is already sitting in
-`~/work-64bit/stage3/rootfs/home/pi/`.
+**That's the real, narrowed-down lead**: identical source, different
+build-tool output ordering for the same custom flash-patch entry. Since
+attempting a local x86_64 build of this exact historical commit hit a
+32-bit/64-bit plugin ABI mismatch (`buildtools/gcc-arm-none-eabi-5_4-2016q2`'s
+`cc1` is 32-bit i386, the currently-built `gcc-nexmon-plugin/nexmon.so` is
+x86-64 — would need a 32-bit rebuild of the plugin, or just build on the
+Pi's aarch64 toolchain instead, which already works), this wasn't fully
+run to ground this session.
+
+**Not yet done, would be the decisive next step**: figure out why identical
+source produces prepended-vs-appended table ordering — likely candidates:
+(a) a different version of `buildtools/gcc-nexmon-plugin/nexmon.c` (the
+compiler plugin itself, which decides `FLASHPATCH` placement/ordering) was
+used for the working build vs. whatever's checked into this repo now, or
+(b) a build-environment/toolchain-version difference (this repo's
+`buildtools/` binaries are pinned; the Kali package may build with a
+different, newer toolchain). Check `buildtools/gcc-nexmon-plugin/nexmon.c`'s
+own git history for changes around ordering/placement logic, and consider
+whether table order (prepended vs. appended) could plausibly matter for
+CLM loading specifically (crash happens *during* `clmload`, so a plausible
+mechanism: FP_DATA_BASE/heap layout shifts depending on where in the table
+the custom entry lands, and something CLM-processing-related collides with
+whatever ends up at the *end* of the table when appended vs. not). Worth
+testing directly: if there's a way to force prepend-instead-of-append in
+this repo's build tooling, try it and see if the crash goes away.
 
 ## Practical gotchas hit while testing on this device
 
@@ -332,17 +346,22 @@ second physical device — everything required is already sitting in
 
 ## TODO — next session, start here
 
-1. **Diff against actual upstream `seemoo-lab/nexmon` first** (see above —
-   the working firmware's `nexmon_ver` string is a real `git describe`
-   from that repo, commit is findable). Compare its
-   `monitormode.c`/`patch.c`/`ioctl.c` for `bcm43430a1` against this repo's
-   to find exactly where they diverged on how monitor mode gets installed.
-   If that's inconclusive or the matching commit can't be pinned down,
-   fall back to a direct stock-vs-patched RAM diff of the confirmed-working
-   `firmware-nexmon` binary (same byte-diff technique used throughout this
-   doc) to find how monitor mode is really wired up there, and whether the
-   same approach (rather than the `0x81F620` flashpatch) fixes RX on
-   `7_45_98` too. This is the most promising open lead from this session.
+1. **Already done, don't repeat**: identified the working firmware's exact
+   source commit (`b8c6999a`, already in this repo's own history — no
+   external clone needed) and confirmed via `git diff` that
+   `patches/bcm43430a1/7_45_41_46/` source is byte-identical to current
+   `Debug` except two trivial, already-understood diffs. Also confirmed
+   (after fixing an off-by-one table-offset bug) that the working binary
+   *does* use the same `0x81F620` flashpatch as this repo, just placed as
+   table entry 0 (prepended) instead of this repo's build output which
+   appends it last. **Next**: chase *why* identical source produces
+   different flash-patch table ordering — see the "real, narrowed-down
+   lead" paragraph above for concrete candidates (compiler plugin version,
+   toolchain version). A local x86_64 build attempt of the historical
+   commit hit a 32-bit/64-bit plugin mismatch; either fix that (rebuild
+   `gcc-nexmon-plugin` as 32-bit to match the pinned 2016 cross-toolchain)
+   or just build on the Pi's aarch64 toolchain, which already works fine
+   for everything else this session.
 2. Apply the same audit-and-fix treatment (wrapper-gap check +
    byte-signature relocation) to other chips/firmware versions:
 - **bcm43436b0** — already has a `rom_extraction` reference implementation
