@@ -215,9 +215,119 @@ tooling or a second data point):
   on the live chip (out of scope for what's available here — no JTAG/SWD
   access set up, only the SDIO-side custom-ioctl memory read/write).
 
-## TODO (explicit ask from the user): apply this to other chips
+## A real reference firmware exists — and it disagrees with this repo's build
 
-The user wants the same audit-and-fix treatment for:
+This device already runs monitor mode successfully in production via a
+*different* source: Pwnagotchi here uses the `brcmfmac-nexmon-dkms` Debian
+package (driver only) plus the `firmware-nexmon` Debian package (firmware +
+CLM, version `0.2`) — **not** anything built from this repo. Both `.deb`s
+are available locally for inspection/extraction:
+`~/work-64bit/stage3/rootfs/home/pi/brcmfmac-nexmon-dkms_6.12.2+ndevfix1_all.deb`
+and `.../firmware-nexmon_0.2_all.deb.1` (`dpkg-deb -x <deb> <destdir>`).
+This is a **confirmed-working** reference, in production on this exact
+physical chip — the single most valuable data point available, more useful
+than a second physical device would have been.
+
+Important wiring detail found while chasing this: on this board
+(`raspberrypi,model-zero-2-w`), `brcmfmac` does **not** load
+`/lib/firmware/brcm/brcmfmac43430-sdio.bin` directly. Firmware selection
+follows board-specific symlinks:
+`brcmfmac43430-sdio.raspberrypi,model-zero-2-w.bin` →
+`brcmfmac43436s-sdio.bin` → `../cypress/cyfmac43430-sdio.bin`. This repo's
+`install-firmware` target does write through this chain correctly (it `cp`s
+onto `brcmfmac43436s-sdio.bin`, which is a symlink, so the real target
+`/lib/firmware/cypress/cyfmac43430-sdio.bin` gets updated) — but if you're
+ever unsure which file is *actually* loaded, don't trust the plain
+`brcm/brcmfmac43430-sdio.bin` path on its own; `readlink -f` the
+board-specific name and `strings | grep nexmon_ver`/version string on the
+resolved file to confirm.
+
+The confirmed-working firmware is `7.45.41.46 (r666254 CY)` —
+**byte-identical stock vendor base** to
+`firmwares/bcm43430a1/7_45_41_46/brcmfmac43430-sdio.bin` already in this
+repo (same CRC `970a33e2`, same build date). So this is a clean, valid
+comparison: same chip, same stock base firmware, different patch source.
+
+**Test performed**: built this repo's `patches/bcm43430a1/7_45_41_46`
+fresh (confirmed zero missing-wrapper gaps beforehand, see pattern above),
+installed it, and it attaches perfectly cleanly with **no CLM blob**
+present. Then installed the CLM blob extracted from the confirmed-working
+`firmware-nexmon` package (`cyfmac43430-sdio.clm_blob`, md5
+`9ff46519b8b8c2cab323322c9d983873` — this is the *same* blob already used
+successfully with `7_45_98` throughout this whole session) alongside our
+`7_45_41_46` build. Result: **100% reproducible firmware trap**, every
+single reload, immediately during/right after `clmload`:
+```
+brcmf_c_process_clm_blob: clmload (4733 byte file) failed (-110)
+brcmf_sdio_checkdied: firmware trap in dongle
+dongle trap info: type 0xc @ epc 0x0001f106 ...
+```
+This is the exact same trap signature noted earlier this session (before
+the missing-wrapper bug was even found) when `7_45_41_46` + this CLM was
+first tried — now confirmed fully reproducible and isolated: not a
+transient wedge, not the CLM blob's fault (proven good elsewhere), not the
+missing-wrapper pattern (this build has none). It's specific to how this
+repo's `7_45_41_46` nexmon source interacts with CLM loading.
+
+**Structural difference found that may explain it**: dumped the flash-patch
+table from the confirmed-working `cyfmac43430-sdio.bin` (same technique as
+above — find the stock table at file offset `0x1800`, the relocated one at
+`0x5aebc` for this binary) and diffed it against the *stock* (unpatched)
+reference firmware's table. Stock has 197 entries; the working patched
+binary's relocated table has only **183**, and critically, **every single
+one of those 183 is a member of the original 197** — nothing new was
+appended, `0x81F620` does not appear anywhere in it. In other words: the
+officially-working firmware's monitor-mode patch does **not** go through
+the flashpatch-table-append mechanism that this repo's `monitormode.c`
+uses (`BLPatch(flash_patch_179, wl_monitor_hook)` at `0x81F620`) — it must
+install monitor-mode support some other way (a straight RAM `PATCH`
+overwrite instead of a `FLASHPATCH` table entry, most likely, mirroring
+how `wl_send_hook`/`wlc_ioctl_hook` in *this* repo already use `PATCH`
+rather than `FLASHPATCH` for their RAM-resident hook points). The official
+build's `nexmon_ver: 2.2.2-552-gb8c6-2` string (a real upstream seemoo-lab
+version tag) also suggests it may come from a meaningfully different
+source tree than what's vendored into this repo, not just a different
+firmware version built from the same source.
+
+**Not yet done, would be the decisive next step**: extract the full RAM
+diff between the stock `7_45_41_46` binary and the confirmed-working
+patched one (same `python3` byte-diff approach used throughout this doc),
+locate whatever *does* redirect execution toward monitor-mode delivery in
+the working build (there will be a modified `bl`/`b` instruction at some
+RAM address, findable by diffing stock vs. patched RAM content directly —
+much easier than the ROM-side blind caller search that came up empty
+earlier), and compare that against what this repo's `monitormode.c`/
+`0x81F620` does. This is very likely the actual fix, and it doesn't need a
+second physical device — everything required is already sitting in
+`~/work-64bit/stage3/rootfs/home/pi/`.
+
+## Practical gotchas hit while testing on this device
+
+- Software `reboot` (systemd) does **not** clear a genuine SDIO backplane
+  wedge — the WiFi chip itself only loses power on a real physical power
+  cycle. If a firmware trap wedges the bus, expect `dongle is not
+  responding: err=-5` to persist across a soft reboot; you need the user to
+  physically power-cycle.
+- This device has a `brcmfmac-watchdog.service` (see
+  `~/PycharmProjects/pwnagotchi/stage3/06-patches/files/brcmfmac-watchdog.*`)
+  that detects `dongle is not responding` in dmesg and **automatically
+  reboots the Pi**. Useful for unattended recovery, but it means a crash
+  loop can eat several minutes on its own before you get a stable window to
+  work in — don't fight it, just wait for `uptime` to show a fresh boot and
+  move fast (`/tmp` gets wiped every time, re-`scp` anything you need).
+- `/tmp/known_good.clm_blob`-style scratch files on the Pi do not survive
+  any of the above reboots — re-transfer before every retest, don't assume
+  a previous `scp` is still there.
+
+## TODO — next session, start here
+
+1. **Do the stock-vs-patched RAM diff described above** for `7_45_41_46`
+   against the confirmed-working `firmware-nexmon` build, to find how
+   monitor mode is really installed there and whether the same approach
+   (rather than the `0x81F620` flashpatch) fixes RX on `7_45_98` too. This
+   is the most promising open lead from this session.
+2. Apply the same audit-and-fix treatment (wrapper-gap check +
+   byte-signature relocation) to other chips/firmware versions:
 - **bcm43436b0** — already has a `rom_extraction` reference implementation
   at `patches/bcm43436b0/9_88_4_65/rom_extraction/` (a full separate
   firmware build with a `wlc_ioctl_hook` at `0x4B274` implementing memory
