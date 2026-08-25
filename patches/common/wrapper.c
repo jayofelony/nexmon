@@ -921,6 +921,7 @@ RETURN_DUMMY
 AT(CHIP_VER_BCM43438, FW_VER_7_45_41_26_r640327, 0x7ef8)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_26_r640327, 0x7ef8)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x7fe4)
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x9f40)      // recovered from the stock value of the function pointer that injection.c's GenericPatch4 overwrites (0x40fe0 holds 0x9f41 = 0x9f40|thumb), the same way 41.46's 0x39674 holds 0x7fe5. Byte/prologue signature search fails here: 7.45.98 recompiled it with a different register list (e92d 4ff0 vs 4ff7) and 'sub sp,#20' instead of pushing r0-r2
 AT(CHIP_VER_BCM4358, FW_VER_7_112_300_14, 0x199b64)
 AT(CHIP_VER_BCM43455c0, FW_VER_7_45_154, 0x1A1D00)
 AT(CHIP_VER_BCM43455c0, FW_VER_7_45_189, 0x1A6A84)
