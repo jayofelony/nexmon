@@ -879,6 +879,40 @@ available is byte-identical, md5 `9ff46519b8b8c2cab323322c9d983873`:
 So there is no 7.45.98-matched CLM to switch to, and "wrong CLM version" is
 ruled out as a cause of the hopping wedge.
 
+### RESOLVED as not-our-bug: stock unpatched 7.45.98 wedges identically
+
+Ran the same test against the **stock, completely unpatched** 7.45.98 firmware
+(`firmwares/bcm43430a1/7_45_98/brcmfmac43430-sdio.bin`, md5
+`a89ad21eae027367eba3d1dcff52c0bd` - confirmed unpatched by `0` `nexmon_ver`
+lines in dmesg). Stock firmware accepts the monitor vif and channel sets fine,
+so the comparison is like-for-like.
+
+| build | hop failures | first fail | -110 |
+|---|---|---|---|
+| nexmon, both GenericPatch4 hooks disabled | 33 | i=49 | 101 |
+| **stock, zero nexmon patches** | **33** | **i=49** | **101** |
+
+Identical to the iteration. Nexmon does not cause this. It is inherent to
+7.45.98 plus this driver under repeated channel changes in monitor mode.
+
+Note also how little the numbers moved across *every* variant tested
+(first failure at i=46, 49, 49, 52, 33) regardless of which nexmon code was
+active - that stability was itself the clue that the cause lay outside the
+patches.
+
+**Consequences**
+
+- The `bcm43430a1/7_45_98` port itself is good: monitor RX decodes correctly,
+  injection works, and fixed-channel operation is stable indefinitely.
+- 7.45.41.46 does **not** have this problem (150/150 hops clean), which is why
+  the existing pwnagotchi setup has never hit it.
+- Any fix belongs driver-side or in hop policy, not in firmware patches.
+  `brcmf_cfg80211_nexmon_set_channel` already retries 3x with a 20ms sleep;
+  candidates are a longer backoff, rate-limiting chanspec changes, or bettercap
+  hopping more slowly. **Not yet tested: whether the wedge is hop-*rate*
+  dependent** - if 5s or 10s intervals survive, that is both the diagnosis and a
+  practical workaround.
+
 ### Where to pick this up
 
 The remaining difference between the two builds is the firmware itself plus the
