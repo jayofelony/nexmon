@@ -105,6 +105,28 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
             }
             break;
 
+        case 606: // probe how many packet buffers the firmware can still hand out
+            /* Allocates until pkt_buf_get_skb() fails, reports the count, then
+             * frees every one again. Used to test whether channel hopping leaks
+             * packet buffers: sample this before, during and after hopping and
+             * watch whether the available count decays. Bounded at 64 so this
+             * can never itself exhaust the pool. */
+            if (len >= 4) {
+                void *bufs[64];
+                int n = 0, got;
+                for (n = 0; n < 64; n++) {
+                    bufs[n] = pkt_buf_get_skb(wlc->osh, 128);
+                    if (bufs[n] == 0)
+                        break;
+                }
+                got = n;
+                while (n-- > 0)
+                    pkt_buf_free_skb(wlc->osh, bufs[n], 0);
+                ((unsigned int *) arg)[0] = got;
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
         case 500: // dump wlif list
             {
                 struct wlc_if *wlcif = wlc->wlcif_list;

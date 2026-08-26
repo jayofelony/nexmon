@@ -958,3 +958,72 @@ CLM requirement. Worth trying next, cheapest first:
 3. Instrument the chanspec path: a `printf` in `wlc_ioctl_hook` for the chanspec
    iovar, to see whether the firmware is still executing commands when the -110s
    begin, or has already stopped.
+
+
+## ROOT CAUSE FOUND: channel hopping exhausts the firmware's packet-buffer pool
+
+The `-110`-on-every-command wedge is **packet-buffer exhaustion**, and channel
+changes are what consume the buffers. Measured directly, not inferred.
+
+### How it was measured
+
+Added a probe ioctl (`case 606` in `ioctl.c`) that allocates `pkt_buf_get_skb()`
+until it fails, reports the count, then frees every one again - bounded at 64 so
+it cannot itself exhaust the pool:
+
+    case 606:
+        void *bufs[64]; int n = 0, got;
+        for (n = 0; n < 64; n++) { bufs[n] = pkt_buf_get_skb(wlc->osh, 128);
+                                   if (bufs[n] == 0) break; }
+        got = n;
+        while (n-- > 0) pkt_buf_free_skb(wlc->osh, bufs[n], 0);
+        ((unsigned int *) arg)[0] = got;
+
+Then hopped channels every 2s while sampling the probe every 5s, logging both
+with timestamps to the same file.
+
+### Result
+
+    t=1384  freebufs=64      <- healthy, saturating the probe's 64 cap
+    t=1389  freebufs=64
+    t=1394  freebufs=64
+    t=1401  freebufs=0       <- pool exhausted, ~18s / ~9 hops in
+    t=1409  freebufs=0
+    HOPFAIL i=9   t=1411     <- first command failure, 10s AFTER exhaustion
+    (every subsequent probe 0, every subsequent hop fails)
+
+Buffer exhaustion **precedes** the command failures. Once the pool is empty the
+firmware cannot allocate to answer host commands, so every ioctl times out at
+-110 - with no TRAP and no SDIO wedge, because nothing has actually crashed.
+This is the same signature as the `wl_monitor_radiotap` delivery leak fixed
+earlier in `e0af3c3c`; that one leaked per received frame, this one leaks per
+channel change.
+
+Note the drop is abrupt (64 -> 0 within one 7s sampling gap, ~3 hops), not a
+slow decay, so each channel change appears to consume many buffers rather than
+one.
+
+### Why this explains everything previously observed
+
+- **Fixed channel is stable indefinitely** - no channel changes, nothing drains.
+- **3 hops then idle is clean** - not enough changes to empty the pool, and
+  nothing continues to consume once hopping stops.
+- **Not rate dependent** - 5s intervals died in fewer hops but similar
+  wall-clock time; the pool empties after a certain number of changes either way.
+- **Not thermal** - temperature flat at 44-45 C throughout.
+- **Stock unpatched 7.45.98 fails identically** - the leak is in the firmware's
+  own channel-change path, not in any nexmon patch.
+- **7.45.41.46 is unaffected** - 150/150 hops clean, so that firmware either
+  does not leak or has enough headroom.
+
+### Where to go next
+
+The leak is inside 7.45.98's chanspec handling. Candidates worth disassembling:
+the chanspec iovar handler and whatever it calls to re-tune the PHY, looking for
+an allocation whose free path is missing or conditional. The probe ioctl makes
+this cheap to iterate on - any candidate fix can be verified in ~30 seconds by
+watching whether `freebufs` still collapses.
+
+Also worth checking: whether the buffers are recoverable once hopping stops. The
+log shows them still at 0 long after, which suggests they are genuinely leaked
+rather than merely in flight.
