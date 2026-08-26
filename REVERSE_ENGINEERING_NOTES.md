@@ -1307,6 +1307,69 @@ short-circuit, so the zeros may be an artefact of the probe rather than the
 memory. Re-read from a **nonzero** offset into the table before concluding
 anything, and before writing to any vector.
 
+## SETTLED: the CPU is alive during the wedge - the wl thread is what stops
+
+The fork in the road above is resolved, and it is not the frightening branch.
+
+A periodic heartbeat was added to the firmware (`case 614` arms it,
+`nex_heartbeat` in `ioctl.c`) that `printf`s a sequence number and the count of
+frames seen by the monitor hook. It reports through the **console ring**, not
+through an ioctl reply, which is the entire point: the host reads that ring
+over SDIO as a plain memory read, without the firmware servicing anything, so
+it keeps working exactly when the command path does not.
+
+Result, hopping at mode 2 until the wedge and then watching for 60 seconds
+with no further hops:
+
+    hop=9  ch=10  ok  NOREPLY            <- ioctl path dead from here
+    ...
+    000075.040 NEXHB 71 rx=39
+    000076.040 NEXHB 72 rx=39
+    ...
+    000086.040 NEXHB 82 rx=39
+    heartbeat lines: 23 at wedge -> 83 after 60s (delta 60)
+    ioctl still dead? NOREPLY
+
+**Exactly 60 heartbeats in 60 seconds**, the firmware's own timestamps
+advancing a clean 1.000s per tick, while every ioctl timed out throughout.
+
+| | state during the wedge |
+|---|---|
+| CPU core | **alive** - timer fires on schedule, `printf` works |
+| RX | **stopped** - `rx=` frozen at 39 from the moment of the wedge |
+| command path | **dead** - every ioctl times out |
+
+### What this rules out, and what it opens up
+
+- **No hard stall, no hung bus access.** The earlier worry - that a backplane
+  register access during the retune never completes and freezes the core - is
+  wrong. The core executes normally in RTE timer context for as long as you
+  care to watch.
+- **No trap, because nothing faulted.** Consistent with the absence of any
+  TRAP message all along.
+- **It is the wl thread specifically.** That thread services both RX
+  processing and ioctls, and both stop together while an unrelated RTE timer
+  keeps running. Whatever happens, happens to that thread - blocked on
+  something that never completes, or spinning - not to the chip.
+- **Firmware-side instrumentation is viable.** Since the CPU runs, a DWT
+  watchpoint plus a DebugMonitor handler over vector `0x30` can execute and
+  report, and any probe that reports via the console ring will be readable
+  during a wedge. This was the open question that decided whether firmware
+  instruments were usable at all; they are.
+
+### Next instrument
+
+The heartbeat is now a general carrier for anything readable during a wedge,
+at zero risk, because it only reads. The obvious next payload is the D11 core
+state that `case 604` already knows how to read - `maccontrol`, `maccommand`,
+`macintstatus`, `macintmask` - printed once per beat. That answers directly
+whether the MAC is still raising interrupts and whether the firmware has left
+them masked, which distinguishes "the wl thread is blocked waiting for an
+interrupt that will never come" from "the wl thread is spinning".
+
+Worth adding at the same time: `osh[0]` and the heap summary, so the passive
+`case 613` picture keeps being available after the ioctls die.
+
 ### Rebuilding the test rig
 
 A reboot wipes `/tmp`, which cost this session the previously deployed

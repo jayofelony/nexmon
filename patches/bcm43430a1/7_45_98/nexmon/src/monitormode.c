@@ -114,8 +114,18 @@ wl_monitor_radiotap(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p)
         wl_sendup_newdrv(wl, 0, p_new, 1);
 }
 
+/* Frames seen by the monitor hook since boot. Read out by ioctl 613 and
+ * reported by the heartbeat in ioctl.c, so that "did the chip stop receiving"
+ * and "did the chip stop executing" can be told apart during a wedge.
+ * Deliberately initialised, so it lands in .data (which is stored in the
+ * image) rather than .bss, whose contents are not guaranteed here.
+ */
+unsigned int nex_rx_frames = 0;
+
 void
 wl_monitor_hook(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p) {
+    nex_rx_frames++;
+
     switch(wl->wlc->monitor & 0xFF) {
         case MONITOR_RADIOTAP:
                 wl_monitor_radiotap(wl, sts, p);

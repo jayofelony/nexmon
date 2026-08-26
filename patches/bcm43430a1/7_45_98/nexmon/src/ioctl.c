@@ -46,7 +46,34 @@
 #include <sendframe.h>          // sendframe functionality
 #include <argprintf.h>
 
-int 
+/* Frames seen by the monitor hook; defined in monitormode.c. */
+extern unsigned int nex_rx_frames;
+
+/* Heartbeat state. Both initialised so they land in .data, not .bss. */
+unsigned int nex_hb_seq = 0;
+unsigned int nex_hb_armed = 0;
+
+/* Periodic heartbeat, printed to the firmware console.
+ *
+ * The point of printing rather than answering an ioctl: once the chip wedges,
+ * the whole dongle-side command path is dead, so nothing can be read out by
+ * ioctl - that is precisely the state we want to observe. The console ring is
+ * different. The host reads it over SDIO as a plain memory read, without the
+ * firmware servicing anything, so a heartbeat that keeps appearing in dmesg
+ * after the ioctls stop answering proves the CPU is still executing and only
+ * the wl thread is stuck. A heartbeat that stops at the same moment means the
+ * core itself has stalled, and then no firmware-side instrument will ever
+ * report anything - only host-side SDIO reads can.
+ *
+ * rx= distinguishes the third case: CPU alive but reception stopped.
+ */
+static void
+nex_heartbeat(struct hndrte_timer *t)
+{
+    printf("NEXHB %u rx=%u\n", ++nex_hb_seq, nex_rx_frames);
+}
+
+int
 wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
 {
     argprintf_init(arg, len);
@@ -346,6 +373,71 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
 
                 out[6] = ((volatile unsigned int *) mfail_addr)[0];
                 out[7] = ((volatile unsigned int *) lbfail_addr)[0];
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
+        case 613: // passive health sample - measures without perturbing
+            /* case 612 allocates and frees 64 packet buffers on every call
+             * (that is its bufs= field), which disturbs exactly the subsystem
+             * under investigation: sampling it every 10s wedged the chip on a
+             * fixed channel with no hopping at all, in 140 seconds. Every
+             * field here is a read, so repeated sampling costs nothing.
+             *
+             * Same magic-word contract as 612 - out[0] is written before
+             * anything is measured, and a reply without it must be discarded
+             * rather than read as a row of zeros.
+             *   [1..3] heap free bytes, free block count, largest free block
+             *   [4]    osh[0], packet buffers the firmware currently holds
+             *   [5]    frames seen by the monitor hook since boot
+             *   [6]    malloc's failure counter (0x728)
+             *   [7]    lb_alloc's failure counter (0x41af0)
+             */
+            if (len >= 32) {
+                unsigned int *out = (unsigned int *) arg;
+                volatile unsigned int head_addr = 0x41a4c;
+                volatile unsigned int mfail_addr = 0x728;
+                volatile unsigned int lbfail_addr = 0x41af0;
+                unsigned int *node = ((unsigned int **) head_addr)[1];
+                unsigned int total = 0, count = 0, biggest = 0, guard = 0;
+
+                out[0] = 0x4E455831; /* "NEX1" - sample is valid */
+
+                while (node != 0 && guard++ < 4096) {
+                    unsigned int sz = node[0];
+                    total += sz;
+                    count++;
+                    if (sz > biggest)
+                        biggest = sz;
+                    node = (unsigned int *) node[1];
+                }
+                out[1] = total;
+                out[2] = count;
+                out[3] = biggest;
+                out[4] = ((volatile unsigned int *) wlc->osh)[0];
+                out[5] = nex_rx_frames;
+                out[6] = ((volatile unsigned int *) mfail_addr)[0];
+                out[7] = ((volatile unsigned int *) lbfail_addr)[0];
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
+        case 614: // arm the periodic console heartbeat (arg[0] = period in ms)
+            /* Armed on demand rather than at boot so that a run can be done
+             * with and without it, and so an unused build behaves exactly as
+             * before. Arming twice would leak a timer, hence the guard.
+             */
+            if (len >= 4) {
+                unsigned int *out = (unsigned int *) arg;
+                unsigned int ms = out[0] ? out[0] : 1000;
+
+                if (!nex_hb_armed) {
+                    if (schedule_work(0, 0, nex_heartbeat, ms, 1)) {
+                        nex_hb_armed = ms;
+                        printf("NEXHB armed %u ms\n", ms);
+                    }
+                }
+                out[0] = nex_hb_armed;
                 ret = IOCTL_SUCCESS;
             }
             break;
