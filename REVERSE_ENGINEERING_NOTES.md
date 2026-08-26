@@ -815,3 +815,69 @@ RSSI.
 is version-specific. When porting monitor mode to a new firmware, check what the
 vendor's own `wl_monitor` tail-calls and prefer that routine - it is the one
 that owns the buffer lifecycle for that build.
+
+## Open: channel hopping wedges 7.45.98 (a second, independent trigger)
+
+The `wl_sendup_newdrv` delivery fix above is real and validated, but it only
+covers **fixed-channel** load. Channel hopping is a separate trigger and is
+still unresolved.
+
+Measured with everything else stopped (pwnagotchi, bettercap, pwngrid and the
+brcmfmac watchdog all disabled), driving the radio by hand: continuous
+`tcpdump` plus `iw dev wlan0mon set channel N` every 2s, 150 iterations.
+
+| build | first hop failure | -110 | chip after |
+|---|---|---|---|
+| 7.45.98, before delivery fix | i=46 (~92s) | 95 | dead |
+| 7.45.98, after delivery fix | i=52 (~104s) | 102 | dead |
+| 7.45.98, monitor hook drops every frame (allocates nothing) | i=33 (~66s) | 135 | dead |
+| 7.45.98, fixed channel (no hopping), after fix | n/a | **0** | **alive** |
+| **7.45.41.46 reference, same test** | **none - all 150 hops OK** | **0** | **alive** |
+
+### What this rules out
+
+- **Not pwnagotchi/bettercap orchestration.** Reproduces with all services
+  stopped, so it is not `reload_brcm()` churn.
+- **Not our monitor RX path.** The drop-all build allocates nothing and still
+  wedges - in fact slightly *sooner*. Whatever this is, `wl_monitor_radiotap`
+  is not involved.
+- **Not a bad patch site.** All three `GenericPatch4` targets hold correct stock
+  values: ioctl hook `0x4a8bc` -> `0x81a2d5` (= `wlc_ioctl|thumb`, same as
+  41.46's `0x4305c`), `wl_send` hook `0x40fe0` -> `0x9f41`, autostart `0x2c40`
+  identical bytes to 41.46's `0x2a94`.
+- **Not a bypassed `wlc_ioctl`.** Suspected `wlc_ioctl` (ROM `0x81a2d4`) might
+  sit inside the function the stock flashpatch at `0x81a284` redirects to RAM
+  (`b.w 0xeda8`) - the same trap as the monitor hook. Disproved: `0x81a2d2` is
+  `pop {r4,r5,r6,pc}` ending that function, and `0x81a2d4` begins a clean
+  prologue (`stmdb sp!,{r4-fp,lr}` / `sub sp,#364`) of its own.
+- **It is 7.45.98-specific.** The 41.46 reference completes all 150 hops clean
+  on the same hardware, driver and test.
+
+### Caveat that could not be controlled
+
+41.46 has CLM built in and **traps on an external blob** (`pc 0x1f106`, the
+clmload crash), while 7.45.98 has no built-in CLM and **requires** the external
+blob. So the two configurations necessarily differ by CLM, and that difference
+cannot be factored out by testing 7.45.98 without a blob: with no CLM its
+channels are not registered, and `iw set channel` is rejected by the *kernel*
+(`-22`, "(extension) channel is disabled") before ever reaching the firmware -
+62/62 failures were `-22` with **zero** `-110`. That run proves nothing about
+the wedge and must not be read as a pass.
+
+Note the CLM in use is not a mismatched one: it is the OS-supplied
+`cypress/cyfmac43430-sdio.clm_blob` (md5 `9ff46519b8b8c2cab323322c9d983873`)
+that ships alongside the stock 7.45.98 firmware.
+
+### Where to pick this up
+
+The remaining difference between the two builds is the firmware itself plus the
+CLM requirement. Worth trying next, cheapest first:
+1. Is it hop-*rate* dependent? Repeat at 5s and 10s intervals. If slow hopping
+   survives, that is both a diagnostic clue and a practical mitigation
+   (bettercap's hop rate is configurable).
+2. Does stock (unpatched) 7.45.98 survive the same hopping? That separates "our
+   port" from "this firmware version" entirely. Monitor mode is needed to hold
+   the vif, so this may not be directly testable - but if it is, it is decisive.
+3. Instrument the chanspec path: a `printf` in `wlc_ioctl_hook` for the chanspec
+   iovar, to see whether the firmware is still executing commands when the -110s
+   begin, or has already stopped.
