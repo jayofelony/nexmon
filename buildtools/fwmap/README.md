@@ -39,6 +39,45 @@ single-caller:
 
     0x9f24 -> 0x9e54 -> 0x25db0 -> 0x20ad4 -> 0x15ffc -> 0xd4e4 -> 0xa5e2
 
+## relocate.py - porting addresses to a new firmware version
+
+`fwmap` answers "who calls this"; `relocate.py` answers "where did this move
+to" and "where is the slot holding this value". Together they cover both kinds
+of entry in a `definitions.mk`: code addresses and data pointers/literals.
+
+    R=buildtools/fwmap/relocate.py
+    OLD=firmwares/bcm43430a1/7_45_41_46/brcmfmac43430-sdio.bin
+    NEW=firmwares/bcm43430a1/7_45_98/brcmfmac43430-sdio.bin
+
+    python3 $R sig --old $OLD --new $NEW --at 0x2390 --auto
+    python3 $R sig --old $OLD --new $NEW --at 0x4f3b8 --auto --mask-literals
+    python3 $R value --bin $NEW --value 0x1800 --context 1
+    python3 $R ptr   --bin $NEW --lo 0x1000 --hi 0x2200
+
+Validated by replaying relocations already established by hand for
+7.45.41.46 -> 7.45.98, and it reproduces each one *and* the signature length
+each was described with:
+
+| entry | old | expected | result |
+|---|---|---|---|
+| `memcpy` | `0x2390` | `0x24ec` | unique at every length |
+| `wlc_d11hdrs` | `0xa024` | `0xbf50` | unique to 32B, then none - hence "32B prologue" |
+| `pkt_buf_free_skb` | `0x638c` | `0x6c74` | unique to 48B |
+| `TEMPLATERAMSTART_PTR` | `0x4f3b8` | `0x55d98` | needs `--mask-literals` |
+| `FP_DATA_END_PTR` | `0x39574` | `0x40edc` | needs `--mask-literals` |
+| `WLC_UCODE_WRITE_BL_HOOK` | `0x45608` | `0x4cee4` | **not found** - see below |
+
+`--mask-literals` exists because a pointer slot's neighbourhood is, as
+`definitions.mk` puts it, "identical except for the relocated literal itself".
+Comparing that literal guarantees a miss, so aligned words that look like
+image addresses are excluded from the compare and reported as `masked:`.
+
+The one failure is the honest kind: that region contains a *relative* `bl`,
+whose encoded offset changes when the code moves, and no amount of literal
+masking fixes that. `definitions.mk` records it as having been found by
+disassembly rather than by signature. Treat "none at any length" as "use
+disassembly", never as "absent".
+
 ## What it is not
 
 Read the output with these in mind - the map is a skeleton, not an authority.
