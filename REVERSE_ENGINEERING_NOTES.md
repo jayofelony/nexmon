@@ -864,9 +864,20 @@ channels are not registered, and `iw set channel` is rejected by the *kernel*
 62/62 failures were `-22` with **zero** `-110`. That run proves nothing about
 the wedge and must not be read as a pass.
 
-Note the CLM in use is not a mismatched one: it is the OS-supplied
-`cypress/cyfmac43430-sdio.clm_blob` (md5 `9ff46519b8b8c2cab323322c9d983873`)
-that ships alongside the stock 7.45.98 firmware.
+Note the CLM in use is **not** a mismatched or nexmon-specific blob, though
+`dpkg -S` makes it look like one: it reports the file as owned by
+`firmware-nexmon` (and `firmware-brcm80211` is held, not installed). That is
+only because firmware-nexmon reinstalls the same bytes. Every 43430 CLM blob
+available is byte-identical, md5 `9ff46519b8b8c2cab323322c9d983873`:
+
+- `stage2/rootfs/.../brcm/brcmfmac43430-sdio.clm_blob`   (stock RPi OS, pre-pwnagotchi)
+- `stage2/rootfs/.../cypress/cyfmac43430-sdio.clm_blob`  (stock RPi OS)
+- `stage3/rootfs/.../cypress/cyfmac43430-sdio.clm_blob`  (after firmware-nexmon)
+- upstream linux-firmware on the dev machine
+- the blob in use on the device
+
+So there is no 7.45.98-matched CLM to switch to, and "wrong CLM version" is
+ruled out as a cause of the hopping wedge.
 
 ### Where to pick this up
 
