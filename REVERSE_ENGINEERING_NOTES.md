@@ -1432,10 +1432,12 @@ damage is already done upstream.
 The question is now specific and answerable statically: **what spins on
 `macintstatus`, and why can bit 8 never be cleared?**
 
-- `macintstatus` is at offset `0x20` from the D11 register base and
-  `macintmask` at `0x24` (as used by `case 604` via `wlc->regs`). Use
-  `buildtools/fwmap` to find every site that loads from those offsets, then
-  look for the loop that re-reads without a path that clears the bit.
+- `macintstatus` is at offset **`0x128`** from the D11 register base and
+  `macintmask` at `0x12c`, with `maccontrol` at `0x120` (per `struct d11regs`
+  in `firmwares/bcm43430a1/structs.common.h` - note it does *not* start with
+  `maccontrol`). The base itself is `0x18001000`, read live from `wlc->regs`;
+  it never appears as a literal in either image because it is resolved through
+  the backplane at runtime.
 - Bit 8 being set in `macintstatus` while clear in `macintmask` is the crux.
   A masked interrupt should simply sit pending and cost nothing, so a spin
   implies something *polls* the register rather than waiting for the interrupt.
@@ -1447,6 +1449,83 @@ The question is now specific and answerable statically: **what spins on
   outside this tree and should be confirmed before being relied on.
 - Since stock 7.45.98 wedges identically and 7.45.41.46 does not, diffing how
   the two versions handle this register is likely to be short and decisive.
+
+## FOUND: the spin is a MAC-suspend wait that never completes
+
+Searching the disassembly for a `macintstatus` load followed by a backward
+branch - the literal signature of a poll loop - gives four sites in RAM and
+four in ROM. One of them is a tight 16-byte busy-wait, at RAM `0x210b0`,
+inside a function entered at `0x2104c`:
+
+    210aa:  movw r6, #8301        ; 0x206d  loop budget
+    210ae:  b    0x210b6
+    210b0:  movs r0, #10
+    210b2:  bl   0x8081f0         ; busy delay, 10us
+    210b6:  ldr  r3, [r5, #296]   ; macintstatus
+    210ba:  lsls r3, r3, #31      ; test bit 0
+    210bc:  bmi  0x210c2          ; set -> done
+    210be:  subs r6, #1
+    210c0:  bne  0x210b0          ; else keep polling
+    210ca:  movs r3, #5           ; budget exhausted -> error 5
+    210cc:  str  r3, [r4, #324]
+
+This is suspend-MAC-and-wait: it asks for a suspend, then polls
+`macintstatus` bit 0 - MAC-suspend-completed - for 8301 iterations of 10us,
+about **83ms**, and stores error code 5 if it never arrives. The routine also
+keeps a nesting count at `[r0,#0xf0]` and guards on `maccontrol + 1 == 0`
+(the all-ones read that means the core is not answering), both of which fit a
+suspend/resume refcount.
+
+`0x8081f0` is a **pure busy-wait**: read a timer, then spin
+`bl 0x87fec0 / subs / cmp / bcc` until the interval elapses. No sleep, no
+yield. So every suspend attempt pins the core for up to 83ms - which is
+exactly the 81.6M cycles/second the DWT counter measured.
+
+### Everything lines up with the live measurements
+
+- `macintstatus` during the wedge reads `0x100`, so **bit 0 is clear** - the
+  MAC never reports that it suspended.
+- `maccontrol` during the wedge still has `EN_MAC` and `PSM_RUN` set - the MAC
+  genuinely was never suspended, this is not a stale status bit.
+- Channel changes are what call this path, which is why hopping is required.
+- The wait is a busy-wait, which is why the core sits at 100% and why the
+  failure is progressive: each attempt burns 83ms, and the more of them pile
+  up the less time anything else gets, until RX and then the command path
+  starve out entirely.
+
+### But the loop itself is NOT the difference between firmware versions
+
+The same code exists in 7.45.41.46, which does **not** wedge, at `0x1c450`
+(found with `relocate.py sig`, unique to 24B). It is instruction-for-
+instruction identical: same `movw r6, #8301`, same `movs r0, #10`, same
+`bl 0x8081f0`, same bit-0 test, same backward branch.
+
+So the ARM-side suspend loop is the mechanism that burns the CPU, not the bug.
+The real question is narrower: **why does bit 0 never get set on 7.45.98?**
+
+### The remaining suspect: the PSM ucode
+
+`MI_MACSSPNDD` is raised by the D11 PSM microcontroller, not by ARM code, and
+the ucode is one of the things that genuinely differs between these two
+firmware versions - `firmwares/bcm43430a1/7_45_98/ucode.bin` is 52056 bytes
+against 52264 for `7_45_41_46`. A ucode that fails to acknowledge a suspend
+request while it is busy receiving would produce precisely this: suspend
+requested during a retune, never acknowledged while frames are arriving,
+83ms burned per attempt, and no wedge at all when reception is off.
+
+That also explains the two results that previously looked awkward: stock
+unpatched 7.45.98 wedges identically (same ucode), and discarding the frame at
+the monitor hook does not help (the ucode is already busy long before any
+host-side delivery decision).
+
+**This last step is an inference, not a measurement.** What is measured is:
+the loop exists, it is a busy-wait, bit 0 never sets, the MAC never suspends,
+and the ARM code is identical in the working version. Attributing it to the
+ucode follows from those plus the version diff, but nothing here has yet read
+or disassembled the ucode itself. The next concrete step is to compare the two
+`ucode.bin` images around their suspend-acknowledge handling - or, far cheaper
+as a first test, to try running 7.45.98 with 7.45.41.46's ucode and see
+whether the wedge disappears.
 
 ### Earlier idea, now superseded
 
