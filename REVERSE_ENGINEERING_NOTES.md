@@ -1151,3 +1151,118 @@ in order of cost:
 Also note: the *first* hop failure is not necessarily the first symptom. Because
 failed ioctls used to be read as zeros, earlier claims about ordering ("the pool
 empties ~10s before the first hop failure") were measuring the same event twice.
+
+## The wedge needs RX, but not delivery, and not concurrency
+
+`case 612` now has a first run that was actually read, and its baseline matches
+the earlier table exactly (`heapfree=74404 blocks=9 biggest=74332 osh0=0
+bufs=64 mfail=0 lbfail=0`, magic `0x4E455831` present). Everything below keeps
+only samples that carried the magic.
+
+Hopping was then repeated at three monitor settings. `MONITOR_DROP_FRM` (mode 4)
+is the interesting one: the RX pipeline runs all the way to the `wl_monitor`
+call site and our hook then discards the frame, so reception happens but nothing
+is allocated and nothing is delivered to the host.
+
+| monitor mode | promiscuous RX | frame delivered to host | first failure (per run) |
+|---|---|---|---|
+| 2 (radiotap) | yes | yes | 6, 6, 9 |
+| 4 (drop at hook) | yes | **no** | 9, 6 |
+| 0 (off) | no | no | **none, 40/40 clean** |
+
+Two controls make this trustworthy:
+
+- **Mode 4 really does keep RX on.** Its heap trajectory tracks mode 2's
+  exactly (blocks 9 -> 10 -> 11 -> 12, `heapfree` 74404 -> 74352 -> 74284),
+  while mode 0 sits frozen at 74404/9 for all 40 hops. If mode 4 had silently
+  disabled reception it would look like mode 0, and it does not.
+- **Mode 0 really does retune.** Read the firmware's own chanspec back after
+  each set and it follows every one - `0x1001, 0x1006, 0x100b, 0x1003` - the
+  same at mode 0 as at mode 2. The clean run is not an artefact of the firmware
+  quietly ignoring the channel change.
+
+### What this rules out
+
+- **The retune alone is not sufficient.** 40 verified channel changes with RX
+  off are harmless.
+- **Delivery to the host is not the trigger.** Dropping the frame the moment
+  the hook runs changes nothing (9, 6 vs 6, 6, 9). That exonerates
+  `wl_sendup_newdrv`, the SDIO path, and all of `wl_monitor_radiotap` - which
+  is exactly what has to be true, given stock unpatched 7.45.98 wedges
+  identically (`2eacc0fa`).
+- **The two do not need to overlap.** Muting RX across the retune - `-m0`,
+  settle, retune, settle, `-m2` - still wedges: at hop 5 with a 50 ms settle,
+  at hop 8 with a full 1000 ms on each side. A whole second of silence on both
+  sides of the channel change does not move the failure point out of the normal
+  6-9 range, so this is not a race between reception and retuning, and
+  quiescing RX around the hop is **not** a viable workaround. (Worth stating
+  plainly because it was the obvious fix to reach for: it does not work.)
+
+So the wedge requires channel changes *and* frame reception, in any temporal
+order, with the frame discarded before it ever leaves the chip. The trigger is
+therefore somewhere in the RX processing *upstream* of the `wl_monitor` call
+site, in code shared by stock and nexmon builds.
+
+Note this also means no monitor-path firmware patch can fix it, and the
+pwnagotchi use case only ever runs at mode 2 - modes 0 and 4 are diagnostic
+instruments, not candidate configurations.
+
+### The state at the moment of death
+
+Unchanged from before, and worth restating now that it is measured with
+validated samples: the last good sample before the wedge is completely healthy
+(`heapfree=74292 blocks=11 osh0=0 bufs=64 mfail=0 lbfail=0`), no packet buffers
+are held, both allocator failure counters are zero, and the chip dies from one
+hop to the next. In runs A and B the channel set at hop 6 itself returned *ok*
+and the very next ioctl got no reply, so the last thing the firmware
+successfully does is a retune.
+
+`dmesg` across a 45-second wedge shows **no TRAP and no console output at all** -
+the last console line is `000001.048 wl0: wl_open` from boot, then nothing until
+the reload banner. The firmware console ring is read by the host over SDIO as a
+plain memory read, without the firmware servicing anything, so silence there is
+suggestive but not yet conclusive: this firmware prints almost nothing during
+normal operation, so it may simply have had nothing to say.
+
+### Where to go next
+
+The fork in the road is **whether the CPU is still executing at all**, because
+it decides which instruments are even usable:
+
+- If the CPU is alive and only the wl thread is stuck, a DWT watchpoint plus a
+  DebugMonitor handler over vector `0x30` can name the blocking instruction.
+- If the CPU is fully stalled - e.g. a backplane register access during the
+  retune that never completes - nothing firmware-side will ever run again, and
+  the only way in is host-side SDIO memory reads.
+
+Cheapest decisive test: add a periodic heartbeat `printf` driven from a timer
+or ISR context, wedge the chip, and watch `dmesg` for console lines. Because the
+host reads the console ring by direct SDIO memory access rather than by asking
+the firmware, a heartbeat that keeps ticking after the ioctl path dies proves
+the CPU is alive; one that stops proves a hard stall. Either answer redirects
+the search, and it costs one firmware rebuild.
+
+Note the `debug.h` in `patches/include` is **not** usable for this as-is: it
+describes the ARMv7-A CoreSight debug registers (`DBGBASE 0x18007000`,
+`DBGDSCR`, `DBGBCR`/`DBGWCR`), not the Cortex-M3 DWT/FPB block this chip has.
+For the M3 the relevant registers are `DWT_CTRL 0xE0001000`, `DWT_COMP0
+0xE0001020` (comparators every 0x10), `DWT_FUNCTION0 0xE0001028`, `DEMCR
+0xE000EDFC` (`MON_EN` = bit 16) and `DFSR 0xE000ED30`; vector `0x30` is entry 12,
+DebugMonitor, consistent with the default handler seen there.
+
+### Rebuilding the test rig
+
+A reboot wipes `/tmp`, which cost this session the previously deployed
+`nexutil`, both helper scripts, and the unread `case 612` run. Everything now
+lives in persistent locations instead: `nexutil` at `/usr/local/bin/nexutil`
+(built natively on the Pi - it has gcc, make and libnl3; `utilities/libnexio`
+then `utilities/nexutil`), and `/home/pi/reload.sh`, `/home/pi/hoptest.sh`,
+`/home/pi/quiesce.sh` with logs beside them as `/home/pi/hoplog-*.txt`.
+
+Two additions to `reload.sh` worth keeping: `rfkill unblock all` before bringing
+interfaces up (the Pi boots soft-blocked, and without it `ip link set` fails
+with "Operation not possible due to RF-kill"), and reading the phy index from
+`/sys/class/net/wlan0/phy80211/name` since it increments on every reload.
+
+The Pi has no RTC and its clock runs hours behind the host, so correlate by
+relative time in the logs rather than by wall clock.
