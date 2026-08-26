@@ -1250,6 +1250,63 @@ For the M3 the relevant registers are `DWT_CTRL 0xE0001000`, `DWT_COMP0
 0xE000EDFC` (`MON_EN` = bit 16) and `DFSR 0xE000ED30`; vector `0x30` is entry 12,
 DebugMonitor, consistent with the default handler seen there.
 
+### WARNING: `case 612` is not a passive probe
+
+`case 612` allocates **64 packet buffers and frees them on every call** - that
+is what the `bufs=` field measures. It perturbs precisely the subsystem under
+investigation, and it does so once per sample.
+
+This surfaced when the chip wedged on a **fixed channel with no hopping at
+all**, after 140 seconds of nothing but a `case 612` sample every 10 seconds:
+
+    t=10s .. t=130s  ALIVE  heapfree=74300 blocks=10 osh0=0 bufs=64
+    t=140s           DEAD
+
+That contradicts the long-standing "fixed channel is stable indefinitely"
+baseline, and the difference from those earlier runs is the probe.
+
+What this does and does not undermine:
+
+- **The mode 0/4/2 comparison stands.** The probe was identical in all three
+  arms, so the difference between them is still attributable to RX. Mode 0 took
+  the same 40 samples and never wedged.
+- **Absolute hop counts do not stand.** "Wedges at hop 6" is partly the probe's
+  doing; the unprobed numbers are much larger (stock wedged at i=49 with no
+  nexmon probe available at all, `2eacc0fa`).
+- **Any future fixed-channel stability claim must say whether it was probed.**
+
+The fix is a passive variant that drops the allocation loop - everything else
+in the sample (heap walk, `osh[0]`, the two failure counters) is a read-only
+observation. Until that exists, treat `bufs=` as the cost of the measurement
+rather than as free information.
+
+Related: `case 600`/`case 603` appear broken when the chip is wedged, returning
+the caller's own input. That is the same no-reply artefact, not a fault in the
+handlers - both work correctly on a healthy chip, and `case 600` is what
+produced the register reads below.
+
+### The ARM core, measured rather than assumed
+
+Read live via `case 600` on a healthy chip:
+
+    CPUID   0xE000ED00 = 0x412fc230   Cortex-M3 r2p0
+    ICSR    0xE000ED04 = 0x00400810   VECTACTIVE=0x10, i.e. sampled inside an ISR
+    VTOR    0xE000ED08 = 0x00000000   vector table at 0
+    AIRCR   0xE000ED0C = 0xfa050000   VECTKEY readback, decode confirmed
+    SysTick 0xE000E010 = 0x00000004   ENABLE=0, RELOAD=0 - unused by the firmware
+    DWT_CTRL 0xE0001000 = 0x40000000  NUMCOMP=4, four comparators, unused
+
+So SysTick is free to take over, and there are four hardware watchpoints
+available. Both are usable for instrumentation.
+
+One unresolved oddity: with `VTOR=0` the table is at address 0, yet reading
+`0x0..0x40` returns all zeros - while `ICSR` proves interrupts are actively
+being dispatched. Note `case 600` reads a NULL source there
+(`memcpy(arg, *(char**)arg, len)` with `arg[0]=0`), which a ROM `memcpy` may
+short-circuit, so the zeros may be an artefact of the probe rather than the
+memory. Re-read from a **nonzero** offset into the table before concluding
+anything, and before writing to any vector.
+
 ### Rebuilding the test rig
 
 A reboot wipes `/tmp`, which cost this session the previously deployed
