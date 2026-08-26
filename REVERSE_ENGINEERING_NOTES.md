@@ -909,9 +909,26 @@ patches.
 - Any fix belongs driver-side or in hop policy, not in firmware patches.
   `brcmf_cfg80211_nexmon_set_channel` already retries 3x with a 20ms sleep;
   candidates are a longer backoff, rate-limiting chanspec changes, or bettercap
-  hopping more slowly. **Not yet tested: whether the wedge is hop-*rate*
-  dependent** - if 5s or 10s intervals survive, that is both the diagnosis and a
-  practical workaround.
+  hopping more slowly. **Tested: it is NOT hop-rate dependent - slowing down
+  does not help.**
+
+**Time-based, not hop-count based.** Same stock firmware, same test, only the
+interval changed:
+
+| interval | first failure | elapsed | hops before failure |
+|---|---|---|---|
+| 2s | i=49 | ~98s | 49 |
+| 5s | i=15 | ~75s | 15 |
+
+The hop count to failure differs 3x (49 vs 15) while the wall-clock time is
+essentially the same, and 5s actually failed marginally *sooner*. So the trigger
+is elapsed time spent doing channel changes, not the number or frequency of
+them. Rate-limiting bettercap's hopper is therefore **not** a workaround.
+
+Also worth noting for contrast: fixed-channel monitor RX runs indefinitely
+(5.5min clean, 0 errors) on the patched build - so some channel changing is
+required to trigger it, but once triggered the clock seems to run on time rather
+than on change count.
 
 ### Where to pick this up
 
