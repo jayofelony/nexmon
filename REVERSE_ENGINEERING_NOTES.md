@@ -742,3 +742,76 @@ from "only breaks under bettercap's hop rate". Compare against 41.46, which is
 known to hop correctly on this hardware - if 41.46 hops fine with the same
 driver, the fault is firmware-side and the `set_channel` ioctl path on 7.45.98
 should get the same wrapper-address scrutiny that fixed RX.
+
+
+## SOLVED: the -110 "firmware stops answering" wedge was nexmon's monitor delivery path
+
+Symptom: after ~90s of monitor-mode RX the chip kept receiving but stopped
+answering every command - `chanspec`, `escan`, `SET_PROMISC`, `allmulti`,
+pm-timeout all returning `-110`, with **no TRAP and no SDIO wedge**. `modprobe -r`
+would hang; only a driver reload (or power cycle) recovered it. It first looked
+like a `set_channel` bug because that is the command bettercap issues most often.
+
+### How it was isolated (each step ruled out one thing)
+
+1. **Not pwnagotchi orchestration.** Stopped and disabled pwnagotchi, bettercap,
+   pwngrid and the brcmfmac watchdog, then drove the radio manually: continuous
+   `tcpdump` plus a channel hop every 2s. It still wedged - first hop failure at
+   iteration 46, i.e. ~92s in, 95 x `-110`. This mattered because the
+   pwnagotchi launcher's own comments warn that repeated bettercap restarts
+   force `reload_brcm()` driver reloads that can wedge the SDIO backplane, and
+   the logs did show the firmware reloading three times in quick succession.
+2. **Not channel hopping.** Same load on a *fixed* channel, no hopping at all:
+   93 x `-110`, chip dead. So the trigger is RX volume through the hook, not the
+   `chanspec` command path.
+3. **It is nexmon's delivery path.** A diagnostic build routed
+   `MONITOR_RADIOTAP` frames through the vendor's own RAM `wl_monitor`
+   (`0xa5e2`) instead of `wl_monitor_radiotap`. Identical 5.5-minute load:
+   **zero** `-110` and a still-responsive chip.
+
+Note on measuring this: the site is rural with 3 APs (`Jachtkamp18`,
+`_IoT`, `_Gast` plus a hidden BSSID on the same radio), so ~30-50 frames/s.
+pcap *size* is therefore useless as a health signal - a small capture is normal
+here, not evidence the firmware died. Only the `-110` count and whether
+`set_channel` still answers are reliable.
+
+### Root cause
+
+`wl_monitor_radiotap` delivered the new skb with
+
+    wl->dev->chained->funcs->xmit(wl->dev, wl->dev->chained, p_new);
+
+On 7.45.98 that does not return the buffer to the pool. Every received frame
+permanently consumed one packet buffer, so at ~30-50 frames/s the pool was gone
+within seconds and the firmware could no longer allocate buffers to answer host
+commands - hence `-110` everywhere, with no crash to point at.
+
+Both vendor monitor routines instead end in a send-up call, RAM `0xa5e2`
+`b.w 0xa46c` and ROM `0x819510` `b.w 0x880f10`, each invoked as
+`(wl, NULL, p_new, 1)` - the existing `wl_sendup_newdrv` wrapper signature.
+That routine does return the buffer.
+
+### The fix, and the subtlety that made it two steps
+
+Switching to `wl_sendup_newdrv(wl, 0, p_new, 1)` stopped the wedge but broke
+capture entirely - 0 packets on `wlan0mon`. Passing `wlif = NULL` sends frames
+up the normal netif, not the monitor vif. (This also explains the diagnostic
+build's empty pcap, which was initially misattributed to missing radiotap
+headers.) The working form passes the monitor interface:
+
+    if (wl->wlc->wlcif_list->next)
+        wl_sendup_newdrv(wl, wl->wlc->wlcif_list->wlif, p_new, 1);
+    else
+        wl_sendup_newdrv(wl, 0, p_new, 1);
+
+plus `AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0xa46c)` for `wl_sendup_newdrv`.
+
+Verified over 5.5 minutes of fixed-channel load: 0 x `-110`, `set_channel` still
+answering afterwards, and captures decoding correctly with SSIDs and realistic
+RSSI.
+
+**Carry-over for other ports**: the `chained->funcs->xmit` delivery in
+`wl_monitor_radiotap` is upstream nexmon code that works on 7.45.41.46, so this
+is version-specific. When porting monitor mode to a new firmware, check what the
+vendor's own `wl_monitor` tail-calls and prefer that routine - it is the one
+that owns the buffer lifecycle for that build.

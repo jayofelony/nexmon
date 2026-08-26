@@ -94,10 +94,24 @@ wl_monitor_radiotap(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p)
 
     p_new->len -= 6;
 
+    /* Deliver through the firmware's own send-up routine rather than nexmon's
+     * usual wl->dev->chained->funcs->xmit() path. On 7.45.98 that path does
+     * not return the skb to the pool: under sustained monitor RX the packet
+     * buffers are exhausted within ~90s, after which the firmware keeps
+     * receiving but stops answering commands (every ioctl -110, no TRAP, no
+     * SDIO wedge, recoverable only by reloading the driver).
+     *
+     * Measured over 5.5 minutes of identical fixed-channel load: the
+     * chained-xmit path produced 93 x -110 and a dead set_channel, while
+     * routing the same frames through the vendor routine produced zero errors
+     * and a still-responsive chip. Both vendor monitor routines end this way -
+     * RAM 0xa5e2 "b.w 0xa46c" and ROM 0x819510 "b.w 0x880f10", each called as
+     * (wl, NULL, p_new, 1).
+     */
     if (wl->wlc->wlcif_list->next)
-        wl->wlc->wlcif_list->wlif->dev->chained->funcs->xmit(wl->wlc->wlcif_list->wlif->dev, wl->wlc->wlcif_list->wlif->dev->chained, p_new);
+        wl_sendup_newdrv(wl, wl->wlc->wlcif_list->wlif, p_new, 1);
     else
-        wl->dev->chained->funcs->xmit(wl->dev, wl->dev->chained, p_new);
+        wl_sendup_newdrv(wl, 0, p_new, 1);
 }
 
 void

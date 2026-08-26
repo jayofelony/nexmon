@@ -952,6 +952,9 @@ RETURN_DUMMY
 AT(CHIP_VER_BCM43596a0, FW_VER_9_96_4_sta_c0, 0x1624AC)
 AT(CHIP_VER_BCM43455c0, FW_VER_7_45_154, 0x1a2438)
 AT(CHIP_VER_BCM43455c0, FW_VER_7_45_189, 0x1A71BC)
+// 7.45.98's RAM wl_monitor (0xa5e2) ends in "b.w 0xa46c" with (wl, 0, p_new, 1),
+// mirroring the ROM copy at 0x819510 which tail-calls 0x880f10 the same way.
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0xa46c)
 void
 wl_sendup_newdrv(void *wl, void *wlif, void *p, int numpkt)
 VOID_DUMMY
