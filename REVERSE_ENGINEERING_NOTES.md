@@ -1027,3 +1027,127 @@ watching whether `freebufs` still collapses.
 Also worth checking: whether the buffers are recoverable once hopping stops. The
 log shows them still at 0 long after, which suggests they are genuinely leaked
 rather than merely in flight.
+
+## CORRECTION: the "packet-buffer exhaustion" root cause above is an artefact, not a finding
+
+The section immediately above (commit `aa539e67`) concluded that channel hopping
+drains the firmware's packet-buffer pool, on the strength of probe ioctl 606
+reporting `freebufs=0` shortly before the first hop failure. **That conclusion
+does not hold.** The measurement could not tell the two cases apart:
+
+- the firmware answered and the count really was zero, or
+- the firmware never answered, and `nexutil` printed back the buffer it had
+  zeroed before the call.
+
+Both print `00 00 00 00`. Every "pool exhausted" reading was taken in exactly
+the window where the chip had stopped answering, so it is the second case.
+
+### How this was proved
+
+`nexutil -g600 -l<n> -v <addr> -i` turns the existing `case 600` into a general
+memory dumper: the address goes into the buffer, the firmware `memcpy`s over it.
+Dumping `0x41a4c` after the wedge returned
+
+    0x000000: 4c 1a 04 00 00 00 00 00 00 00 00 00 ...   (rest all zero)
+
+- word 0 is `0x00041a4c`, the address that was written *into* the buffer as
+  input, and nothing else was touched. The firmware never ran the handler; the
+host printed its own input back. The same shape appeared for every other
+"collapsed" reading.
+
+**Rule for all future probes on this chip: an ioctl that can time out must write
+a magic word before it measures anything, and any sample without that magic must
+be discarded, not interpreted.** Left in the tree as `case 612`, which writes
+`0x4E455831` ("NEX1") into `out[0]` first and gathers everything else in one
+reply. It is built and deployed but its first run has not been read yet.
+
+## What the hopping wedge actually looks like, measured with valid samples only
+
+Sampling the heap and the packet counters once per hop, and keeping only replies
+that actually came back from the firmware:
+
+    baseline   heapfree=74404  blocks=9   osh0=0
+    hop=1      heapfree=74360  blocks=10  osh0=0
+    hop=2..9   heapfree=74352  blocks=11  osh0=0
+    hop=10     heapfree=74292  blocks=11  osh0=0
+    hop=11     heapfree=74292  blocks=11  osh0=0
+    hop=12     *** no reply *** -> wedged from here on
+
+Across eleven channel changes the heap moved by **112 bytes** and the number of
+packet buffers the firmware holds stayed at **zero**. There is no packet leak and
+no heap leak. The firmware simply stops answering, from one hop to the next, with
+its memory in a perfectly healthy state.
+
+So the wedge is not resource exhaustion at all. Something in the channel-change
+path hangs or blocks the wl thread. Consistent with this: after the wedge, our
+own `case 606`/`case 612` handlers do not run either, so it is not "wl is busy
+while the ioctl path still works" - the whole dongle-side command path is dead.
+
+### The allocator chain, fully mapped (useful regardless)
+
+    pkt_buf_get_skb   RAM 0x6c30
+      -> ROM 0x808744        thin wrapper, increments osh[0] on success
+        -> ROM 0x880ba0      indirect thunk: jumps through RAM pointer table
+                             entry at 0x488  (41.46: same slot, 0x2b44)
+          -> RAM 0x2cf0      lb_alloc: rejects requests over 0x838 bytes,
+                             then calls malloc; bumps 0x41af0 on failure
+            -> RAM 0x25e4    malloc, best-fit over a free list;
+                             bumps 0x728 on failure
+
+    free list head   0x41a4c   (constant returned by the accessor at 0x25b4)
+    node layout      [0] = size, [4] = next; the head carries no block
+
+`osh[0]` was verified to be the live outstanding-packet count with `case 609`:
+it reads 0, then 16 while sixteen buffers are held, then 0 again. At idle in
+monitor mode it sits at 0, i.e. nothing is retained per received frame.
+
+Free blocks legitimately appear at very low addresses (e.g. a 28-byte block at
+`0x214c`). That is not corruption: the boot log shows `reclaim section 0:
+Returned 39344 bytes to the heap` and `reclaim section 1: Returned 80916 bytes`,
+so init-only code below `0x2200` is handed to the allocator once boot completes.
+
+## Iterating on this without power cycles
+
+`rmmod brcmfmac; modprobe brcmfmac` fully recovers a wedged chip - the firmware
+is re-downloaded. No physical power cycle is needed to run another test.
+
+Two things that waste a lot of time if forgotten:
+
+- **When the chip is wedged, do not touch the netdevs first.** `ip link set
+  wlan0mon down` and `iw dev wlan0mon del` block on firmware ioctls that never
+  answer, and `rmmod` then fails with `EBUSY`. Go straight to `rmmod`.
+- **Create and open the monitor vif before setting monitor mode.** Calling
+  `nexutil -m2` first makes the driver refuse the interface with
+  `brcmf_net_mon_open: Monitor mode is already enabled` -> `RTNETLINK answers:
+  File exists`, and the vif stays DOWN. Correct order: `ip link set wlan0 up`,
+  `iw phy <phy> interface add wlan0mon type monitor`, `ip link set wlan0mon up`,
+  `ip link set wlan0 down`, then `nexutil -Iwlan0mon -m2`. Note the phy index
+  increments on every driver reload, so read it from
+  `/sys/class/net/wlan0/phy80211/name` rather than hardcoding `phy0`.
+
+Helper scripts left on the device: `/tmp/reload.sh` (robust reload + monitor
+setup) and `/tmp/hoptest7.sh` (reload, then hop while sampling `case 612`).
+
+## Where to go next on the hopping wedge
+
+The question is no longer "what leaks" but "what blocks". Worth trying, roughly
+in order of cost:
+
+1. Read the first `case 612` run (it is deployed and was launched but never
+   read) to confirm the picture above with the magic-word check in place.
+2. Establish whether the wedge is the channel change itself or the RX that
+   follows it: repeat the hop loop with monitor mode 0, so the firmware delivers
+   nothing, and with the antenna quiet. If hopping alone never wedges, the
+   trigger is the interaction with received frames, not the retune.
+3. Find where the wl thread is stuck. The ARM here is a Cortex-M3 with the
+   vector table at `0x0` (`0x30` = DebugMonitor, currently the default handler
+   `0x21f1`), so a DWT data watchpoint plus a DebugMonitor handler installed
+   over `0x30` would name the faulting instruction directly. Note nexmon's
+   `debug.h` only defines register constants - there is no implemented API.
+4. `msglevel` is a dead end: `WLC_SET_MSGLEVEL` reads back `0x00000000`
+   whatever is written, and channel changes produce no console output, so the
+   verbose logging is compiled out of this release firmware.
+
+Also note: the *first* hop failure is not necessarily the first symptom. Because
+failed ioctls used to be read as zeros, earlier claims about ordering ("the pool
+empties ~10s before the first hop failure") were measuring the same event twice.
