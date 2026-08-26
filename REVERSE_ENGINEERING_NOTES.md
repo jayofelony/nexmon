@@ -1527,6 +1527,71 @@ or disassembled the ucode itself. The next concrete step is to compare the two
 as a first test, to try running 7.45.98 with 7.45.41.46's ucode and see
 whether the wedge disappears.
 
+### RULED OUT: the ucode is not the difference
+
+Built 7.45.98 with 7.45.41.46's `ucode.bin` swapped in (compresses to 25430
+bytes, well inside the 0x91ed budget) and flashed it. It boots cleanly -
+`Decompressing ucode ... (len: 25430)`, `Decompression res:0`, chip comes up
+and receives - so the two versions' ucode and ARM code are compatible enough
+to run.
+
+**It wedges anyway**, at hop 12, inside the normal 6-11 spread, and the
+heartbeat signature is identical in every respect:
+
+    NEXHB 29 rx=39 dcyc=81594974 osh0=0 mc=c5520403 is=100 im=bae7a864
+
+Same 100% CPU, same `macintstatus` latched at `0x100`, same `maccontrol`, same
+frozen `rx`. So the PSM ucode is **not** what differs in a way that matters,
+and the inference recorded above is wrong. Worth keeping the negative: it was
+cheap, it was the obvious suspect, and it is now eliminated.
+
+What survives from that section is the measured part - the busy-wait loop, its
+83ms budget, `macintstatus` bit 0 never setting, and the MAC never actually
+suspending. Only the attribution to ucode is retracted.
+
+### The strongest remaining lead: 7.45.98's RAM RX reimplementation
+
+The one place these two firmwares are already *known* to diverge in the RX path
+is documented earlier in this file: 7.45.98's stock flash-patch table contains
+an entry at `0x81f410` that replaces the ROM RX routine's prologue with a
+branch into a **RAM reimplementation at `0xd4e4`**, whereas 7.45.41.46 has no
+such diversion and runs the ROM code. That is why the monitor hook had to move
+to the RAM call site `0xd716` in the first place.
+
+This lead fits everything the ucode hypothesis did, and unlike it, is not yet
+contradicted:
+
+- It is RX code, and RX is required for the wedge (mode 0 never wedges).
+- It is upstream of the monitor hook, which is why discarding the frame at the
+  hook does not help (mode 4 wedges like mode 2).
+- It is present in stock unpatched 7.45.98, which wedges identically, and
+  absent in 7.45.41.46, which does not.
+- It is version-specific RAM code, so swapping the ucode would not change it -
+  consistent with the negative result above.
+
+The call map puts the whole chain in one region of RAM:
+
+    0x9f24 -> 0x9e54 -> 0x25db0 -> 0x20ad4 -> 0x15ffc -> 0xd4e4 -> 0xa5e2
+
+and note `0x20ad4` sits close to both `wlc_bmac_read_tsf` (`0x20abc`) and the
+suspend-and-wait routine (`0x2104c`). Whether the RX path and the suspend path
+actually share state there is the thing to check next.
+
+### Next instrument, if hardware work resumes
+
+Nothing so far proves the CPU is spinning *in that particular loop* - only that
+it is spinning and that this loop is a plausible busy-wait on a bit that never
+sets. A PC sampler would settle it: SysTick is confirmed free on this chip
+(`CTRL=0x4`, `RELOAD=0`), so a SysTick handler that records the stacked PC from
+the exception frame would name the spinning code directly, and the heartbeat
+can print it.
+
+That needs the vector table, and the table is still unresolved - `VTOR=0` says
+it is at address 0, but every read of `0x0..0x40` has come back either zeroed
+or as a failed-ioctl artefact. Reads of low memory also appear to wedge the
+chip, though that is confounded by how readily this device now wedges on its
+own. Resolve the table before writing any vector.
+
 ### Earlier idea, now superseded
 
 Everything so far says the wl thread stops while the chip around it stays
