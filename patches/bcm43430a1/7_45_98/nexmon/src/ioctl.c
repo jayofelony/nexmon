@@ -57,6 +57,25 @@ unsigned int nex_hb_armed = 0;
  * D11 registers without being handed a wlc pointer it has no way to get. */
 struct wlc_info *nex_hb_wlc = 0;
 
+/* Cortex-M3 DWT cycle counter. Confirmed present and unused on this chip:
+ * DWT_CTRL reads 0x40000000, i.e. NUMCOMP=4 with CYCCNTENA clear.
+ *
+ * CYCCNT counts processor clock cycles and does not advance while the core is
+ * in sleep, so the per-second delta separates the two ways the wl thread can
+ * fail to come back: a delta near the core clock means nothing ever idles and
+ * something is spinning, a delta well below it means the core sleeps between
+ * interrupts and the thread is blocked waiting on something that never posts.
+ *
+ * TRCENA in DEMCR has to be set before the DWT block responds at all.
+ */
+#define DEMCR           (*(volatile unsigned int *) 0xE000EDFC)
+#define DWT_CTRL        (*(volatile unsigned int *) 0xE0001000)
+#define DWT_CYCCNT      (*(volatile unsigned int *) 0xE0001004)
+#define DEMCR_TRCENA    (1u << 24)
+#define DWT_CYCCNTENA   (1u << 0)
+
+unsigned int nex_hb_lastcyc = 0;
+
 /* Periodic heartbeat, printed to the firmware console.
  *
  * The point of printing rather than answering an ioctl: once the chip wedges,
@@ -86,18 +105,27 @@ struct wlc_info *nex_hb_wlc = 0;
 static void
 nex_heartbeat(struct hndrte_timer *t)
 {
-    unsigned int mc = 0, mcmd = 0, mis = 0, mim = 0, osh0 = 0;
+    unsigned int mc = 0, mis = 0, mim = 0, osh0 = 0;
+    unsigned int cyc, dcyc;
+
+    /* Unsigned subtraction, so a 32-bit wrap of CYCCNT still yields the right
+     * delta - at ~80MHz it wraps roughly every 53 seconds. */
+    cyc = DWT_CYCCNT;
+    dcyc = cyc - nex_hb_lastcyc;
+    nex_hb_lastcyc = cyc;
 
     if (nex_hb_wlc) {
         mc   = nex_hb_wlc->regs->maccontrol;
-        mcmd = nex_hb_wlc->regs->maccommand;
         mis  = nex_hb_wlc->regs->macintstatus;
         mim  = nex_hb_wlc->regs->macintmask;
         osh0 = ((volatile unsigned int *) nex_hb_wlc->osh)[0];
     }
 
-    printf("NEXHB %u rx=%u osh0=%u mc=%x cmd=%x is=%x im=%x\n",
-           ++nex_hb_seq, nex_rx_frames, osh0, mc, mcmd, mis, mim);
+    /* maccommand is dropped from the line: it read a constant 4 throughout the
+     * previous run, and keeping the argument count down matters more here than
+     * re-reporting it. */
+    printf("NEXHB %u rx=%u dcyc=%u osh0=%u mc=%x is=%x im=%x\n",
+           ++nex_hb_seq, nex_rx_frames, dcyc, osh0, mc, mis, mim);
 }
 
 int
@@ -459,6 +487,15 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
                 unsigned int ms = out[0] ? out[0] : 1000;
 
                 nex_hb_wlc = wlc;
+
+                /* TRCENA first - the DWT block does not respond until it is
+                 * set. Zeroing CYCCNT before enabling makes the first delta
+                 * meaningful rather than a count since reset. */
+                DEMCR |= DEMCR_TRCENA;
+                DWT_CYCCNT = 0;
+                nex_hb_lastcyc = 0;
+                DWT_CTRL |= DWT_CYCCNTENA;
+
                 if (!nex_hb_armed) {
                     if (schedule_work(0, 0, nex_heartbeat, ms, 1)) {
                         nex_hb_armed = ms;

@@ -1388,7 +1388,67 @@ interrupt bits are deliberately not named here. What is safe to say is that
 neither register ever changes again - consistent with nobody servicing
 interrupts any more, which is what a dead wl thread would look like.
 
-### Next instrument
+### SETTLED: it is a spin, and macintstatus bit 8 latching is the trigger
+
+The DWT cycle counter answers it outright. The boot banner gives the core clock
+(`BCM43430 r1 @ 37.4/81.6/81.6MHz`), so 81.6M cycles in a one-second beat is
+100% CPU with no idle at all.
+
+    beat  1-6   dcyc 40.7M - 44.0M   is=0      ~50% duty, core sleeping half the time
+    beat  7     dcyc 54.8M           is=0->100 transition
+    beat  8     dcyc 81.62M          is=100
+    beat  9-56  dcyc 81.59M-81.62M   is=100    never drops again
+
+**The core never idles again after beat 8.** So the wl thread is *spinning* -
+a loop whose exit condition never becomes true - not blocked on something that
+never posts. That rules out the whole "waiting on a semaphore/event" family and
+makes the DWT comparators the wrong next tool.
+
+In the same beat the CPU pegs, `macintstatus` goes `0 -> 0x100` and **latches
+there permanently** - it holds `0x100` for the rest of the run, as does
+`macintmask` at `0xbae7a864`, in which bit 8 is *clear*.
+
+### The failure is progressive, not instantaneous
+
+Worth being precise about, because it constrains the mechanism:
+
+    t~12s  (beat 8)   CPU pegs at 100%, is latches 0x100
+    t~12-28s          RX still working - rx climbs 24 -> 39
+    t~28s  (beat 24)  rx freezes at 39
+    t~30s  (hop 11)   ioctl path dies
+
+The CPU pegs roughly **18 seconds before** the command path dies, and RX keeps
+running for ~16 of those seconds. So the spin does not immediately lock
+everything out; it starves RX and the command path progressively. Any
+explanation has to account for that gap rather than a clean simultaneous stop.
+
+Note also that the spin begins right as RX traffic picks up (`rx` jumps 2 -> 24
+in the same beat), which fits the mode-0/4 result: reception is required for
+the wedge, and discarding the frame at the hook does not help because the
+damage is already done upstream.
+
+### Where to go next
+
+The question is now specific and answerable statically: **what spins on
+`macintstatus`, and why can bit 8 never be cleared?**
+
+- `macintstatus` is at offset `0x20` from the D11 register base and
+  `macintmask` at `0x24` (as used by `case 604` via `wlc->regs`). Use
+  `buildtools/fwmap` to find every site that loads from those offsets, then
+  look for the loop that re-reads without a path that clears the bit.
+- Bit 8 being set in `macintstatus` while clear in `macintmask` is the crux.
+  A masked interrupt should simply sit pending and cost nothing, so a spin
+  implies something *polls* the register rather than waiting for the interrupt.
+  Find that poll.
+- This repo has no `MI_` definitions, so bit 8 is deliberately not named here.
+  In the stock Broadcom d11 layout bit 8 is one of the general-purpose
+  ucode-to-driver signalling interrupts, which would fit a ucode-raised
+  condition the driver never acknowledges - but that is an inference from
+  outside this tree and should be confirmed before being relied on.
+- Since stock 7.45.98 wedges identically and 7.45.41.46 does not, diffing how
+  the two versions handle this register is likely to be short and decisive.
+
+### Earlier idea, now superseded
 
 Everything so far says the wl thread stops while the chip around it stays
 healthy. The next thing worth knowing is whether that thread is **spinning or
