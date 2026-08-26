@@ -912,8 +912,18 @@ patches.
   hopping more slowly. **Tested: it is NOT hop-rate dependent - slowing down
   does not help.**
 
-**Time-based, not hop-count based.** Same stock firmware, same test, only the
-interval changed:
+**Not thermal, and not a one-shot timer.** Tested directly on stock 7.45.98:
+three channel changes over ~12s, then hopping *stopped* and the chip left in
+monitor mode for 5 minutes while logging SoC temperature. Result: **0 x -110**,
+`set_channel` still working afterwards, and temperature **flat at 44.0-45.1 C**
+throughout (boot 46.2 C, post-wedge 45.1 C - it never climbs). `throttled=0x0`.
+So the wedge needs *sustained* channel changing; a short burst is harmless, and
+the chip is nowhere near a thermal limit. Note the BCM43430 has no exposed
+temperature sensor - `thermal_zone0` is the SoC - but with the SoC flat at 44 C
+and no throttling there is no plausible thermal mechanism here.
+
+**Requires sustained hopping; the count/rate relationship is not simple.** Same
+stock firmware, same test, only the interval changed:
 
 | interval | first failure | elapsed | hops before failure |
 |---|---|---|---|
@@ -921,9 +931,14 @@ interval changed:
 | 5s | i=15 | ~75s | 15 |
 
 The hop count to failure differs 3x (49 vs 15) while the wall-clock time is
-essentially the same, and 5s actually failed marginally *sooner*. So the trigger
-is elapsed time spent doing channel changes, not the number or frequency of
-them. Rate-limiting bettercap's hopper is therefore **not** a workaround.
+similar, and 5s actually failed marginally *sooner* - so rate-limiting
+bettercap's hopper is **not** a workaround. But this is not pure elapsed time
+either, since 3 hops followed by 5 idle minutes is completely clean. The
+requirement is *ongoing* channel changes; the threshold sits somewhere between
+3 and ~15 continuous hops, and does not reduce to a simple count or rate.
+With n=1 per condition the 75s vs 98s gap may well be noise; the robust facts
+are: 0 hops = stable indefinitely, 3 hops = stable, continuous hopping = dead
+within ~100s.
 
 Also worth noting for contrast: fixed-channel monitor RX runs indefinitely
 (5.5min clean, 0 errors) on the patched build - so some channel changing is
