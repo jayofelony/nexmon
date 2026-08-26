@@ -55,8 +55,24 @@
 void
 wl_monitor_radiotap(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p) {
     struct sk_buff *p_new = pkt_buf_get_skb(wl->wlc->osh, p->len + sizeof(struct nexmon_radiotap_header));
-    struct nexmon_radiotap_header *frame = (struct nexmon_radiotap_header *) p_new->data;
+    struct nexmon_radiotap_header *frame;
     struct tsf tsf;
+
+    /* Out of packet buffers: drop this frame, exactly as the vendor's own
+     * monitor routines do (RAM 0xa5e2 "cbz r0, 0xa62c" and ROM 0x819510
+     * "cbz r0, 0x81955a" both return immediately on a NULL allocation).
+     *
+     * This matters far more than it looks on this chip: RAMSTART is 0x0, so a
+     * NULL dereference does NOT fault - it silently writes the radiotap header
+     * over the firmware's own low memory. The result is a chip that keeps
+     * receiving but stops answering commands, with every ioctl returning -110
+     * and no TRAP to point at the cause. Under sustained pwnagotchi load this
+     * wedged the firmware after a few hours.
+     */
+    if (p_new == 0)
+        return;
+
+    frame = (struct nexmon_radiotap_header *) p_new->data;
     wlc_bmac_read_tsf(wl->wlc_hw, &tsf.tsf_l, &tsf.tsf_h);
 
     frame->header.it_version = 0;
