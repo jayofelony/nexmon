@@ -1357,7 +1357,61 @@ advancing a clean 1.000s per tick, while every ioctl timed out throughout.
   during a wedge. This was the open question that decided whether firmware
   instruments were usable at all; they are.
 
+### D11 core state during the wedge: the MAC is fine
+
+Second build, same experiment, with the heartbeat also printing the D11
+registers `case 604` already knew how to read. Across 45 seconds of wedge the
+values are **bit-for-bit identical on every beat**:
+
+    NEXHB 58 rx=39 osh0=0 mc=c5520403 cmd=4 is=100 im=bae7a864
+    ... (45 more, all identical except the sequence number)
+
+`maccontrol = 0xc5520403` decodes, against the `MCTL_` definitions in
+`firmwares/*/structs.common.h`, to:
+
+    bit31 GMODE      bit30 DISCARD_PMQ  bit26 WAKE     bit24 PROMISC
+    bit22 KEEPCONTROL bit20 BCNS_PROMISC bit17 INFRA   bit10 IHR_EN
+    bit1  PSM_RUN    bit0  EN_MAC
+
+The three that matter: **`EN_MAC` is set, `PSM_RUN` is set, and `PROMISC` is
+set.** The MAC is enabled, the ucode PSM is running, and the core is still in
+promiscuous mode - exactly the configuration it should be in for monitor mode -
+and yet `rx=` never advances again. The receive hardware has not been disabled,
+reset, or reconfigured by the wedge.
+
+That the decode lands on such a coherent, expected bit pattern is also good
+evidence the `wlc->regs` struct offsets are right. Treat `im=bae7a864` with
+more caution - 17 bits set is an odd-looking interrupt mask, and there are no
+`MI_` definitions anywhere in this repo to check it against, so the individual
+interrupt bits are deliberately not named here. What is safe to say is that
+`macintstatus` holds bit 8, that bit 8 is *clear* in `macintmask`, and that
+neither register ever changes again - consistent with nobody servicing
+interrupts any more, which is what a dead wl thread would look like.
+
 ### Next instrument
+
+Everything so far says the wl thread stops while the chip around it stays
+healthy. The next thing worth knowing is whether that thread is **spinning or
+blocked**, because it splits the search cleanly: a spin means a loop with an
+exit condition that never becomes true, a block means a wait on something that
+never posts.
+
+The DWT cycle counter answers it cheaply and is already available
+(`DWT_CTRL` reads `0x40000000`, so the block is present with 4 comparators and
+currently unused). Enable `CYCCNT` (`DWT_CTRL` bit 0, counter at
+`0xE0001004`) and print the per-beat delta:
+
+- delta at roughly the full clock rate -> the core never idles -> something is
+  spinning
+- delta well below it -> the core is sleeping between interrupts -> the wl
+  thread is blocked, waiting
+
+Take a healthy-chip baseline in the same run for comparison, since the
+absolute clock rate here is not documented anywhere in this repo.
+
+If it turns out to be blocked, the four DWT comparators become the tool of
+choice: watch the semaphore/event word the thread waits on and catch who
+should have posted it.
 
 The heartbeat is now a general carrier for anything readable during a wedge,
 at zero risk, because it only reads. The obvious next payload is the D11 core

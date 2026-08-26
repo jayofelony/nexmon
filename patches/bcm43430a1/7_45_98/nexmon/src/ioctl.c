@@ -49,9 +49,13 @@
 /* Frames seen by the monitor hook; defined in monitormode.c. */
 extern unsigned int nex_rx_frames;
 
-/* Heartbeat state. Both initialised so they land in .data, not .bss. */
+/* Heartbeat state. All initialised so they land in .data, not .bss. */
 unsigned int nex_hb_seq = 0;
 unsigned int nex_hb_armed = 0;
+
+/* Stashed when the heartbeat is armed, so the timer callback can reach the
+ * D11 registers without being handed a wlc pointer it has no way to get. */
+struct wlc_info *nex_hb_wlc = 0;
 
 /* Periodic heartbeat, printed to the firmware console.
  *
@@ -66,11 +70,34 @@ unsigned int nex_hb_armed = 0;
  * report anything - only host-side SDIO reads can.
  *
  * rx= distinguishes the third case: CPU alive but reception stopped.
+ *
+ * The D11 registers are the payload that matters. Both RX processing and
+ * ioctls live in the wl thread and stop together at the wedge, so the question
+ * is why that thread never runs again. macintstatus/macintmask separate the
+ * two candidate answers: if the MAC is still posting interrupts and they are
+ * still unmasked, the thread is spinning or blocked on something else; if
+ * macintmask has been cleared, or macintstatus is stuck, the thread is waiting
+ * for an interrupt that can no longer arrive.
+ *
+ * Everything here is a plain register or memory read, so the heartbeat cannot
+ * itself perturb what it is measuring - which matters, given case 612 did
+ * exactly that.
  */
 static void
 nex_heartbeat(struct hndrte_timer *t)
 {
-    printf("NEXHB %u rx=%u\n", ++nex_hb_seq, nex_rx_frames);
+    unsigned int mc = 0, mcmd = 0, mis = 0, mim = 0, osh0 = 0;
+
+    if (nex_hb_wlc) {
+        mc   = nex_hb_wlc->regs->maccontrol;
+        mcmd = nex_hb_wlc->regs->maccommand;
+        mis  = nex_hb_wlc->regs->macintstatus;
+        mim  = nex_hb_wlc->regs->macintmask;
+        osh0 = ((volatile unsigned int *) nex_hb_wlc->osh)[0];
+    }
+
+    printf("NEXHB %u rx=%u osh0=%u mc=%x cmd=%x is=%x im=%x\n",
+           ++nex_hb_seq, nex_rx_frames, osh0, mc, mcmd, mis, mim);
 }
 
 int
@@ -431,6 +458,7 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
                 unsigned int *out = (unsigned int *) arg;
                 unsigned int ms = out[0] ? out[0] : 1000;
 
+                nex_hb_wlc = wlc;
                 if (!nex_hb_armed) {
                     if (schedule_work(0, 0, nex_heartbeat, ms, 1)) {
                         nex_hb_armed = ms;
