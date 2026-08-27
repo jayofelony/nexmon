@@ -14,11 +14,22 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
   `patches/include/firmware_version.h` has `FW_VER_7_45_265 115`. Build verified:
   ucode.bin 53160B (0xCFA8) starts with ucode magic, templateram.bin 2272B (0x8E0),
   flashpatches.c has 255 entries all < 0xB0000.
-- [TODO] Stage 2 — patch directory (`patches/bcm43455c0/7_45_265/`): copy sources from
+- [DONE] Stage 2 — patch directory (`patches/bcm43455c0/7_45_265/`): sources copied from
   206 (injection/monitormode/sendframe/ioctl/patch/console) and 234_CY (version.c
-  scaffolding + Makefile), retarget every `at()` to the 265 addresses in the plan's
-  tables, comment out `wlc_monitor_amsdu_patch`, add 5 wrapper.c AT() lines, disassemble
-  every new address before building.
+  scaffolding + Makefile), all `at()` retargeted to 7.45.265 addresses,
+  `wlc_monitor_amsdu_patch` commented out (Stage 6, not yet derived), 5 wrapper.c
+  `FW_VER_7_45_265` lines added (memcpy, wl_send, wl_sendup, wl_monitor, chan2freq).
+  Every address confirmed by disassembly against the live 265 image before building:
+  - `0x1A7604` disassembles to exactly `bl 0x1a323c` (the wl_monitor call site) - exact.
+  - `0x1A323C` (wl_monitor) internally calls `bl 0x19a0f8` and tail-calls `b.w 0x1a2f68`
+    - i.e. it independently corroborates the memcpy (0x19A0F8) and wl_sendup (0x1A2F68)
+    addresses at the same time, resolving what was the weakest-evidence address in the
+    plan (only 16B signature match) to very high confidence.
+  - `0x202AAC`/`0x202AC8` both currently hold `mov.w rX, #1024` (0x400) - exactly the
+    "console buffer size" pattern 206 doubles to 0x800, at both sites.
+  - `0x20B988` holds `0x203b9` (wlc_ioctl+1) and `0x200E20` holds `0x1a2831`
+    (wl_send+1) - both exact.
+  All five addresses check out; none needed correction from the planning-stage values.
 - [TODO] Stage 3 — build (`make clean && make firmware-only`), sanity-check image size
   and diffed regions against stock.
 - [TODO] Stage 4 — wrapper audit (`gen/nexmon.pre` DUMMY cross-check); loop with Stage 2
@@ -27,7 +38,7 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
   tcpdump cross-checked against wlan0, 5d injection cross-checked against wlan0).
 - [TODO] Stage 6 — `wlc_monitor_amsdu_patch` address (optional, only after 5c/5d pass).
 
-Next concrete action: Stage 2, copy+retarget patch sources.
+Next concrete action: Stage 3, build the patch.
 
 Plan file: `/home/jayofelony/.claude/plans/i-need-you-to-bubbly-bonbon.md` (all address
 tables, confidence levels, and verification commands live there — this file only tracks
