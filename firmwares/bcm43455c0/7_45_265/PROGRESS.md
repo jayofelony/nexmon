@@ -40,13 +40,21 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
   fp_config regions or a known GenericPatch4 slot. Added
   `patches/bcm43455c0/7_45_265/nexmon/.gitignore` (matching the `7_45_98` precedent) to
   keep the built binary and BUILD_NUMBER untracked.
-- [TODO] Stage 4 — wrapper audit (`gen/nexmon.pre` DUMMY cross-check); loop with Stage 2
-  until clean. Do not deploy until this passes.
+- [DONE] Stage 4 — wrapper audit. 266 weak (`W`) symbols in `gen/patch.elf`; 233 are
+  `b_flash_patch_N` (expected stock ROM flashpatch entries, ignored per the audit method),
+  the remaining 33 all appear as `DUMMY` in `gen/nexmon.pre`
+  (bcm_binit/bcm_bprintf/free/hndrte_free_timer/hndrte_init_timer/hndrte_schedule_work/
+  hndrte_time_ms/lb_alloc/memcpy/memset/pkt_buf_free_skb/pkt_buf_get_skb/printf/
+  si_corereg/sprintf/strlen/strncmp/udelay/vsnprintf/wlc_bmac_write_template_ram/
+  wlc_enable_mac/wlc_ioctl/wlc_iovar_op/wlc_pcb_fn_register/wlc_phy_chan2freq_acphy/
+  wlc_queue_80211_frag/wlc_recv/wlc_scan_ioctl/wlc_sendctl/wlc_suspend_mac_and_wait/
+  wl_monitor/wl_send/wl_sendup). **Zero real findings.** No silently-missing wrapper
+  in this build - safe to deploy.
 - [TODO] Stage 5 — deploy (5a boot, 5b console/ioctl via nexutil, 5c monitor mode +
   tcpdump cross-checked against wlan0, 5d injection cross-checked against wlan0).
 - [TODO] Stage 6 — `wlc_monitor_amsdu_patch` address (optional, only after 5c/5d pass).
 
-Next concrete action: Stage 4, wrapper audit.
+Next concrete action: Stage 5, deploy (5a boot check first).
 
 Plan file: `/home/jayofelony/.claude/plans/i-need-you-to-bubbly-bonbon.md` (all address
 tables, confidence levels, and verification commands live there — this file only tracks
