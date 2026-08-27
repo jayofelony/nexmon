@@ -105,7 +105,8 @@ unsigned int nex_hb_lastcyc = 0;
 static void
 nex_heartbeat(struct hndrte_timer *t)
 {
-    unsigned int mc = 0, mis = 0, mim = 0, osh0 = 0;
+    unsigned int mis = 0, mim = 0;
+    unsigned int m5c = 0, m60 = 0, m64 = 0;
     unsigned int cyc, dcyc;
 
     /* Unsigned subtraction, so a 32-bit wrap of CYCCNT still yields the right
@@ -115,17 +116,40 @@ nex_heartbeat(struct hndrte_timer *t)
     nex_hb_lastcyc = cyc;
 
     if (nex_hb_wlc) {
-        mc   = nex_hb_wlc->regs->maccontrol;
-        mis  = nex_hb_wlc->regs->macintstatus;
-        mim  = nex_hb_wlc->regs->macintmask;
-        osh0 = ((volatile unsigned int *) nex_hb_wlc->osh)[0];
+        /* The ISR at ROM 0x8563ec decides what to acknowledge like this:
+         *
+         *   r8 = macintstatus                    ldr r8,[r7,#0x128]
+         *   r6 = hw[0x5c] | hw[0x64]             the software mask
+         *   r6 &= r8                             ands r6,r6,r8
+         *   if (r6 == 0) return;                 beq  - ACKS NOTHING
+         *   macintstatus = r6                    str r6,[r7,#0x128]
+         *
+         * So it only ever clears bits that are in the software mask. A status
+         * bit outside that mask can never be acknowledged and stays latched
+         * forever - which is exactly the behaviour of is=0x100.
+         *
+         * Printing the three mask words tests that directly: if bit 8 is set
+         * in macintstatus and clear in (m5c | m64) during the wedge, the ISR
+         * provably cannot clear it.
+         *
+         * (The suspend slots hw+0xf0/+0xf4/+0x144 were checked here first and
+         * read 0 throughout, including mid-wedge, with the hw pointer verified
+         * via hw+0x88 == 0x18001000 - so the MAC-suspend busy-wait is not
+         * where the CPU goes. Dropped from the line rather than kept.)
+         */
+        volatile unsigned int *hw = (volatile unsigned int *) nex_hb_wlc->hw;
+
+        mis = nex_hb_wlc->regs->macintstatus;
+        mim = nex_hb_wlc->regs->macintmask;
+        if (hw) {
+            m5c = hw[0x5c / 4];
+            m60 = hw[0x60 / 4];
+            m64 = hw[0x64 / 4];
+        }
     }
 
-    /* maccommand is dropped from the line: it read a constant 4 throughout the
-     * previous run, and keeping the argument count down matters more here than
-     * re-reporting it. */
-    printf("NEXHB %u rx=%u dcyc=%u osh0=%u mc=%x is=%x im=%x\n",
-           ++nex_hb_seq, nex_rx_frames, dcyc, osh0, mc, mis, mim);
+    printf("NEXHB %u rx=%u dcyc=%u is=%x im=%x m5c=%x m60=%x m64=%x\n",
+           ++nex_hb_seq, nex_rx_frames, dcyc, mis, mim, m5c, m60, m64);
 }
 
 int

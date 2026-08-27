@@ -1592,6 +1592,124 @@ or as a failed-ioctl artefact. Reads of low memory also appear to wedge the
 chip, though that is confounded by how readily this device now wedges on its
 own. Resolve the table before writing any vector.
 
+## ROOT CAUSE: macintstatus bit 8 is MI_RXOV, an RX FIFO overflow nothing can clear
+
+### The missing header
+
+This repo has no `MI_` definitions, which is why bit 8 went unnamed for so
+long. They exist in a public Broadcom `wl` driver tree (found via
+`seemoo-lab/nexmon` issue #595):
+
+    https://github.com/FlUxIuS/rt-ac86u_et
+      release/src-rt-5.02hnd/bcmdrivers/broadcom/net/wl/impl51/4365/src/
+        include/d11.h      <- MI_* bits, d11regs, SHM layout
+        wl/sys/wlc_bmac.c  <- the bmac layer, ISR and RXOV handling
+
+That tree is worth keeping in mind for any future work here: it names
+registers, struct fields and driver logic this repo only has as addresses.
+
+From its `d11.h`:
+
+    #define MI_NSPECGEN_1  (1 <<  8)   /* non-specific gen-stat bits set by PSM */
+    #define MI_RXOV        MI_NSPECGEN_1   /* rxfifo overflow interrupt */
+
+**Bit 8 is `MI_RXOV` - RX FIFO overflow.**
+
+### Why it can never be cleared
+
+The ISR at ROM `0x8563ec` decides what to acknowledge like this:
+
+    8563f0:  ldr r5,[r0,#16]      ; r5 = wlc->hw
+    8563f4:  ldr r7,[r5,#0x88]    ; r7 = hw->regs
+    8563fc:  ldr r8,[r7,#0x128]   ; r8 = macintstatus
+    85640e:  ldr r3,[r5,#0x5c]    ; defmacintmask
+    856414:  ldr r6,[r5,#0x64]    ; macintmask
+    856416:  orrs r6, r3
+    856418:  ands r6, r6, r8      ; r6 = status & softmask
+    85641c:  beq  0x856456        ; nothing for us -> return, ACKING NOTHING
+    856432:  str  r6,[r7,#0x128]  ; ack only the bits in softmask
+
+It only ever writes back bits that are in the software mask. A status bit
+outside that mask is never acknowledged and latches permanently.
+
+And `MI_RXOV` is outside it. `wlc_bmac.c` shows why:
+
+    #ifdef WLRXOV
+        if (WLRXOV_ENAB(wlc->pub))
+            wlc_hw->defmacintmask |= MI_RXOV;
+    #endif
+
+`MI_RXOV` only enters the mask when `WLRXOV` is built in. It is not, in this
+firmware - measured live on the chip, every beat, healthy and wedged alike:
+
+    im=bae7a864  m5c=bae7a864  m60=bae7a864  m64=0
+
+`m5c` is `defmacintmask`, `m64` is `macintmask`; the ISR's effective mask is
+`m5c | m64` = `0xbae7a864`, and **bit 8 is clear in all of them**, including
+the hardware `macintmask`. So the chip never even raises the interrupt, and
+the ISR could not acknowledge it if it did.
+
+### The transition, measured
+
+    NEXHB 6  rx=16  dcyc=42414926  is=0    m5c=bae7a864 m64=0   healthy, ~50% duty
+    NEXHB 7  rx=31  dcyc=53081217  is=100  m5c=bae7a864 m64=0   RXOV latches
+    NEXHB 8  rx=31  dcyc=81570542  is=100  m5c=bae7a864 m64=0   100% CPU
+    NEXHB 9+        dcyc=81.6M     is=100                       never recovers
+
+`rx` jumps 16 -> 31 in the beat where `is` becomes `0x100`: a burst of frames
+arrives, the FIFO overflows, `MI_RXOV` sets, and the core pegs and stays there.
+
+### This explains every earlier result
+
+- **RX required** (mode 0 clean, 40/40): no reception, no FIFO, no overflow.
+- **Delivery irrelevant** (mode 4 wedges like mode 2): the overflow is in the
+  D11 hardware FIFO, far upstream of any host-delivery decision.
+- **Stock 7.45.98 fails identically**: the mask is the firmware's, not ours.
+- **MAC still enabled and promiscuous, yet `rx` frozen**: the MAC is fine; its
+  receive FIFO has overflowed and nothing recovers it.
+- **No trap, no leak, healthy heap**: nothing crashed or leaked.
+- **Concurrency not required**: RX and hopping both contribute traffic/bursts;
+  they never had to overlap.
+
+### Corrections this supersedes
+
+- The MAC-suspend busy-wait at `0x210b0` is **not** where the CPU goes. Measured
+  directly: `hw+0xf0` (suspend depth), `hw+0xf4` (pending) and `hw+0x144`
+  (result) all read 0 throughout, including mid-wedge, with the `hw` pointer
+  verified by `hw+0x88 == 0x18001000`. That loop was a plausible-looking red
+  herring and is now excluded.
+- "The wl thread is stuck" was too coarse. The heartbeat is an `hndrte` timer
+  callback running off the RTE main loop, and it fires with 1.000s precision
+  right through the wedge - so the main loop is alive and scheduling. What has
+  stopped is RX progress and command servicing, while the loop spins without
+  ever idling.
+
+### Toward a fix
+
+The vendor's own handling, `wlc_rxov_int()` in `wlc_bmac.c`, does not reset
+anything dramatic - it throttles TX and backs off:
+
+    wlc_set_txmaxpkts(wlc, wlc->rxov_txmaxpkts);
+    wl_add_timer(wlc->wl, wlc->rxov_timer, wlc->rxov_delay, FALSE);
+    wlc->rxov_delay = MIN(wlc->rxov_delay*2, RXOV_TIMEOUT_MAX);
+
+so the intended recovery is throttle-and-retry, with `MI_RXOV` unmasked so the
+condition is *noticed* in the first place. Two directions worth trying, in
+order of cost:
+
+1. Add `MI_RXOV` to the masks from a nexmon patch (`hw+0x5c`, and the hardware
+   `macintmask`) so the bit is at least acknowledged and cleared each time,
+   and see whether the wedge simply stops. This is cheap and directly tests
+   whether the latched bit is what holds the RX path down.
+2. If clearing alone is not enough, the FIFO itself needs recovering, which is
+   what a fuller `wlc_rxov_int()` equivalent would do.
+
+Note 7.45.41.46 is unaffected while presumably having the same masks, so
+before building anything, check whether 41.46 ever raises `MI_RXOV` at all -
+its RX path is the ROM routine, whereas 7.45.98 runs the RAM reimplementation
+at `0xd4e4` reached via the stock flashpatch at `0x81f410`. If 41.46 simply
+never overflows, the fix belongs in that RAM RX path rather than in the mask.
+
 ### Earlier idea, now superseded
 
 Everything so far says the wl thread stops while the chip around it stays
