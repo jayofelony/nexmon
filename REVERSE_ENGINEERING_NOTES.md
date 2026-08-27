@@ -2151,3 +2151,80 @@ what has forty of something in the receive path is now the whole problem, and
 `dma_attach`'s `nrxd`/`nrxpost` arguments are the obvious place to start
 looking - they are the ring sizing parameters, and `dma_attach` already has a
 wrapper entry (though not yet for this firmware version).
+
+## FIXED: 7.45.98 skips pkt_buf_free_skb on received frames
+
+### The bug
+
+The caller of the RX routine (RAM `0x15ffc`) ends one of two ways:
+
+    1619e:  mov r0,r7 / mov r1,r5 / movs r2,#0
+    161a8:  b.w 0x6c74              <- pkt_buf_free_skb, returns the buffer
+    161ac:  ldmia.w sp!, {...,pc}   <- plain return, buffer NOT freed
+
+and 7.45.98 adds a branch, immediately after the RX routine returns, that takes
+the second one:
+
+    1609e:  bl 0xd4e4              <- RX routine, ends in the wl_monitor call
+    160a2:  ldr.w r3,[r4,#0x208]
+    160a6:  cbz r3, 0x160b2
+    160a8:  ldr r3,[r4,#0]
+    160aa:  ldrb.w r3,[r3,#0x3f]
+    160ae:  cmp r3,#0
+    160b0:  beq.n 0x161ac          <- skip the free
+    160b2:  ldrh r3,[r6,#16]       <- normal path, reaches the free
+
+7.45.41.46's equivalent function (`0x12c20`, located with `relocate.py`,
+unique to 32B) has no such branch and always reaches the free. That is the
+version difference this file has been hunting since the beginning.
+
+### The fix
+
+    __attribute__((at(0x160b0, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)))
+    GenericPatch2(rx_leak_no_early_exit, 0xbf00);   // nop
+
+NOPping the branch makes the early exit unreachable, so every received frame
+reaches `pkt_buf_free_skb`, as on 41.46. One instruction.
+
+### Result
+
+Before, under every condition tested, the chip died at ~40 received frames.
+After:
+
+    fixed channel, 240s:   rx = 20,949    no wedge
+    fixed channel, longer: rx = 72,074    no wedge
+    60 channel hops @2s:   60/60 hops ok, 0 failed, chanspec tracks every hop
+
+with `is=0` (no RXOV latch), `dloop` back to 85-345 per beat (was 0), and the
+SDIO card healthy throughout. Receive throughput went from a trickle of ~1
+frame per 5s - the pool was already starving from the first frame - to ~90-500
+frames/second.
+
+### Caveats worth carrying
+
+- **The branch presumably existed for a reason.** The condition is
+  `[r4+0x208] != 0 && [[r4]+0x3f] == 0`; if that marks frames handed off
+  elsewhere and freed by someone else, NOPping it converts a leak into a
+  double free. Nothing bad was observed across 70,000+ frames, but the
+  condition has not been decoded and that is the risk to check before shipping
+  this. Decoding what `+0x208` and `+0x3f` are is the obvious follow-up.
+- **`osh[0]` never showed the leak.** It read 0-1 throughout, where a leak of
+  forty buffers should have made it climb. Either it does not track this pool
+  or it is not the counter this file has assumed since `case 609`. Unresolved,
+  and it is why the leak was not spotted from the probe data alone.
+- The `~40` figure was never confirmed as a specific pool size; it is simply
+  where the chip died, repeatably, under every condition.
+
+### Harness bug found alongside
+
+`setup.sh` only deleted `wlan0mon` when the *netdev* existed. When an add
+failed, it still went on to run `nexutil -m2`, leaving the driver tracking a
+monitor vif with no netdev - after which every later add failed with
+
+    brcmf_vif_add_validate: ... there is already a monitor interface, returning EOPNOTSUPP
+
+and `iw dev wlan0mon set channel` returned `No such device (-19)` while
+`nexutil` kept working, because nexutil's netlink path uses the driver's global
+netdev rather than the named interface. That disagreement between the two tools
+is the tell. Always verify the add succeeded before setting monitor mode, and
+treat a missing netdev as needing cleanup rather than as nothing to clean.

@@ -199,3 +199,44 @@ wl_monitor_hook(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p) {
  */
 __attribute__((at(0xd716, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)))
 BLPatch(wl_monitor_ram_call, wl_monitor_hook);
+
+/* 7.45.98 leaks one packet buffer per received frame.
+ *
+ * The caller of the RX routine ends one of two ways:
+ *
+ *   1619e:  mov r0,r7 / mov r1,r5 / movs r2,#0
+ *   161a8:  b.w 0x6c74               <- pkt_buf_free_skb, returns the buffer
+ *   161ac:  ldmia.w sp!, {...,pc}    <- plain return, buffer NOT freed
+ *
+ * and 7.45.98 adds a branch, immediately after the RX routine returns, that
+ * takes the second one:
+ *
+ *   1609e:  bl 0xd4e4               <- RX routine (ends in the wl_monitor call)
+ *   160a2:  ldr.w r3,[r4,#0x208]
+ *   160a6:  cbz r3, 0x160b2
+ *   160a8:  ldr r3,[r4,#0]
+ *   160aa:  ldrb.w r3,[r3,#0x3f]
+ *   160ae:  cmp r3,#0
+ *   160b0:  beq.n 0x161ac           <- skip the free
+ *   160b2:  ldrh r3,[r6,#16]        <- normal path, reaches the free
+ *
+ * 7.45.41.46's equivalent (0x12c20) has no such branch and always reaches the
+ * free, which is why it never wedges.
+ *
+ * That matches the measured behaviour exactly: the chip dies after ~40 received
+ * frames under every condition tested - fixed channel or hopping, any hop rate,
+ * any channel, and in monitor mode 4 where the frame is discarded at the hook -
+ * because the leak is in the caller, upstream of anything nexmon does. ~40 is
+ * the packet buffer pool; once it is empty the receive FIFO overflows, MI_RXOV
+ * latches, and the unacknowledged overflow storms IRQ 0.
+ *
+ * NOPping the branch makes the early exit unreachable, so every frame reaches
+ * pkt_buf_free_skb, as on 41.46. 0xbf00 is "nop".
+ *
+ * Caveat worth re-checking: osh[0], the outstanding-packet count, read 0-1
+ * throughout the runs rather than climbing to ~40, which is not what a buffer
+ * leak should look like. Either that counter does not track these buffers or
+ * this branch is not taken as often as the reasoning above assumes.
+ */
+__attribute__((at(0x160b0, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)))
+GenericPatch2(rx_leak_no_early_exit, 0xbf00);
