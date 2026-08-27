@@ -1628,6 +1628,28 @@ interrupt that will never come" from "the wl thread is spinning".
 Worth adding at the same time: `osh[0]` and the heap summary, so the passive
 `case 613` picture keeps being available after the ioctls die.
 
+### Always `make clean` after changing a firmware input
+
+Rebuilding after swapping `ucode.bin` (or any `$(FW_PATH)` input) without a
+`make clean` silently produces a **corrupt image**. The patcher writes into
+`./brcmfmac43430-sdio.bin` in the patch directory, and if that file already
+exists from a previous build it gets patched *again* rather than being recopied
+from the pristine firmware, so patches land on top of patches.
+
+Nothing in the build output says so - it reports `APPLYING PATCHES` and exits
+0. The failure only shows up at load time, and helpfully the driver does catch
+it:
+
+    brcmfmac: brcmf_sdio_verifymemory: Downloaded RAM image is corrupted,
+              block offset is 401408, len is 480
+    brcmfmac: brcmf_sdio_download_firmware: dongle image file download failed
+
+(401408 + 480 = 401888 = exactly the image size, i.e. the final block.) The
+chip then never enumerates, there are no `wlan` netdevs and no firmware console
+output at all, which looks alarmingly like dead hardware but is only a bad
+image. `make clean && make` fixes it; compare md5s to confirm, since a
+double-patched image is the same *size* as a good one.
+
 ### Rebuilding the test rig
 
 A reboot wipes `/tmp`, which cost this session the previously deployed
