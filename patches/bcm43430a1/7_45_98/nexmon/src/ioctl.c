@@ -49,6 +49,9 @@
 /* Frames seen by the monitor hook; defined in monitormode.c. */
 extern unsigned int nex_rx_frames;
 
+/* Main-loop iterations; defined in autostart.c. */
+extern unsigned int nex_loop_count;
+
 /* Heartbeat state. All initialised so they land in .data, not .bss. */
 unsigned int nex_hb_seq = 0;
 unsigned int nex_hb_armed = 0;
@@ -98,6 +101,23 @@ struct wlc_info *nex_hb_wlc = 0;
 #define D11_MACINTSTATUS  0x128
 #define D11_MACINTMASK    0x12c
 
+/* NVIC / SCB, to identify what the core is actually servicing.
+ *
+ * The RTE main loop is "wfi; bx lr" in a loop (ROM 0x80700c, reached from
+ * 0x2c5a via two thunks). During the wedge it stops iterating entirely while
+ * CYCCNT runs at the full core clock, so the core is neither sleeping nor
+ * returning to idle - it is stuck in interrupt context.
+ *
+ * IABR is the register that names it: it has a bit set for every interrupt
+ * currently *active*, including ones preempted by the timer ISR the heartbeat
+ * runs in. ICSR's VECTACTIVE only reports the innermost exception, which is
+ * the heartbeat's own, so IABR is the useful one. All read-only.
+ */
+#define ICSR            (*(volatile unsigned int *) 0xE000ED04)
+#define NVIC_ISPR0      (*(volatile unsigned int *) 0xE000E200)
+#define NVIC_IABR0      (*(volatile unsigned int *) 0xE000E300)
+#define NVIC_ISER0      (*(volatile unsigned int *) 0xE000E100)
+
 #define DEMCR           (*(volatile unsigned int *) 0xE000EDFC)
 #define DWT_CTRL        (*(volatile unsigned int *) 0xE0001000)
 #define DWT_CYCCNT      (*(volatile unsigned int *) 0xE0001004)
@@ -105,6 +125,7 @@ struct wlc_info *nex_hb_wlc = 0;
 #define DWT_CYCCNTENA   (1u << 0)
 
 unsigned int nex_hb_lastcyc = 0;
+unsigned int nex_hb_lastloop = 0;
 
 /* When nonzero, the heartbeat clears MI_RXOV out of macintstatus every time it
  * sees it set, and counts how often it had to.
@@ -313,9 +334,16 @@ nex_heartbeat(struct hndrte_timer *t)
         nex_dwt_hits = hits;
     }
 
-    printf("NEXHB %u rx=%u dcyc=%u is=%x ov=%u dwt=%x armed=%x\n",
-           ++nex_hb_seq, nex_rx_frames, dcyc, mis, nex_rxov_seen,
-           nex_dwt_hits, nex_dwt_armed);
+    /* dloop is iterations of the RTE main loop since the previous beat - the
+     * headline number now that PC sampling is unavailable. */
+    {
+        unsigned int lc = nex_loop_count;
+        unsigned int dloop = lc - nex_hb_lastloop;
+        nex_hb_lastloop = lc;
+        printf("NEXHB %u rx=%u dcyc=%u dloop=%u is=%x iabr=%x ispr=%x icsr=%x\n",
+               ++nex_hb_seq, nex_rx_frames, dcyc, dloop, mis,
+               NVIC_IABR0, NVIC_ISPR0, ICSR);
+    }
 }
 
 int

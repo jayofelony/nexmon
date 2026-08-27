@@ -1999,3 +1999,75 @@ Software instrumentation only, guided by the call map:
 2. Beyond that, bisect with `BLPatch` counters at candidate sites from
    `buildtools/fwmap` - one build per candidate, but it depends on no debug
    hardware and cannot brick the chip the way the above does.
+
+## MECHANISM: the wedge is an interrupt storm on IRQ 0
+
+Two measurements settle what the core is doing, neither needing debug hardware.
+
+### The "main loop" is `wfi`, and during the wedge it stops running
+
+`hndrte_idle` at `0x2c40` is not called per iteration - it *is* the loop, and is
+entered exactly once:
+
+    2c58:  mov r0, r4
+    2c5a:  bl  0x807de4      <- per-iteration dispatch
+    2c5e:  b.n 0x2c58        <- unconditional
+
+Following `0x807de4` through two thunks (`0x808338`, then `0x80700c`) lands on:
+
+    80700c:  wfi
+    80700e:  bx lr
+
+So the idle loop is literally "sleep until an interrupt, repeat". A `BLPatch`
+at `0x2c5a` counting iterations (`nex_loop_count`, `autostart.c`) gives:
+
+    healthy      dloop=195, 9, 7, 5, 7, 9    dcyc ~42-44M   (sleeps between wakes)
+    wedge onset  dloop=2, 8, 2               dcyc 81.6M
+    wedged       dloop=0                     dcyc 81.6M
+
+`dloop=0` with `CYCCNT` at the full core clock is the important combination:
+the core is **neither sleeping nor returning to idle**. The only place left is
+interrupt context.
+
+### IRQ 0 is active and pending at the same time
+
+Reading the NVIC from the heartbeat - all read-only - names it:
+
+    healthy   iabr=1  ispr=18e  icsr=400810   VECTPENDING=0
+    wedged    iabr=1  ispr=18f  icsr=410810   VECTPENDING=16
+
+`iabr` bit 0 is set in both: IRQ 0 is the interrupt the firmware runs in
+normally. The difference is `ispr` bit 0, and `VECTPENDING=16` (exception 16 =
+IRQ 0) in `ICSR`. So while the IRQ 0 handler is *still active*, IRQ 0 is
+*already pending again* - it re-enters the moment it returns, forever.
+
+That is an interrupt storm, and it explains the whole symptom set at once:
+
+- 100% CPU with no idle - the core never reaches the `wfi`.
+- `dloop=0` - the idle loop never gets another iteration.
+- The heartbeat keeps perfect 1.000s time - `hndrte` timers are dispatched from
+  interrupt context, which is the one thing still running.
+- RX and ioctl processing die - both are thread-level work driven from the idle
+  loop, and it never runs again.
+- No trap, no leak, healthy heap, MAC still enabled - nothing crashed.
+
+Note the heartbeat's own `ICSR` reads `VECTACTIVE=16`, i.e. it is itself
+dispatched under IRQ 0, which is why `VECTACTIVE` alone was never going to be
+informative and `IABR` was the register worth reading.
+
+### Where this points
+
+IRQ 0's vector lives at `0x40`, inside the unreadable window, so the handler
+cannot be identified that way. But it does not need to be: the question is what
+keeps *asserting* IRQ 0.
+
+`MI_RXOV` is latched in `macintstatus` throughout, and `dma_rxfill` was already
+shown to clear that flag without ending the wedge - so the assertion survives
+the flag being cleared. The likely source is therefore a DMA-side receive error
+or overflow status that is separate from `macintstatus` and is never
+acknowledged.
+
+Next concrete step: dump the RX DMA registers for `hw->di[0]` (rcv control and
+status - `dma_rx`/`dma_rxfill` are now relocated for this firmware, `0x56b0`
+and `0x58ac`) and look for a status bit that stays asserted through the wedge.
+That is the thing to clear.

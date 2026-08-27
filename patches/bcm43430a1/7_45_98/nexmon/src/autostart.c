@@ -48,3 +48,44 @@ autostart(void)
 
 __attribute__((at(0x2c40, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)))
 HookPatch4(hndrte_idle, autostart, "push {r4, lr}\nmov r4, r0");
+
+/* Main-loop iteration counter.
+ *
+ * hndrte_idle at 0x2c40 is not called per iteration - it IS the main loop, and
+ * is entered exactly once:
+ *
+ *   2c58:  mov r0, r4        <- loop top
+ *   2c5a:  bl  0x807de4      <- per-iteration dispatch
+ *   2c5e:  b.n 0x2c58        <- unconditional, never exits
+ *
+ * so counting entries to hndrte_idle would only ever report 1. Hooking the
+ * dispatch call instead counts how many times the loop goes round.
+ *
+ * This is the measurement that splits the remaining search. The core never
+ * idles during the wedge (CYCCNT pinned at 81.6M), and the heartbeat - an
+ * hndrte timer dispatched from inside 0x807de4 - keeps firing on time, so the
+ * loop is demonstrably still turning. What the rate says:
+ *
+ *   iterations/sec stays normal  -> the loop cycles and finds work every pass;
+ *                                   the spin is inside something 0x807de4
+ *                                   calls, and the wedge is livelock
+ *   iterations/sec collapses     -> the loop is stuck inside a single dispatch
+ *                                   call and the heartbeat is being serviced
+ *                                   from somewhere else
+ *
+ * Needed the ARM debug hardware to be unavailable to justify doing it this way;
+ * see REVERSE_ENGINEERING_NOTES.md - both PC-sampler routes brick this chip.
+ */
+unsigned int nex_loop_count = 0;
+
+void
+nex_hndrte_run_hook(void *arg)
+{
+    void (*orig)(void *) = (void (*)(void *)) (0x807de4 | 1);
+
+    nex_loop_count++;
+    orig(arg);
+}
+
+__attribute__((at(0x2c5a, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)))
+BLPatch(nex_hndrte_run_hook, nex_hndrte_run_hook);
