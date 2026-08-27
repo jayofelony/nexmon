@@ -50,8 +50,17 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
   wlc_queue_80211_frag/wlc_recv/wlc_scan_ioctl/wlc_sendctl/wlc_suspend_mac_and_wait/
   wl_monitor/wl_send/wl_sendup). **Zero real findings.** No silently-missing wrapper
   in this build - safe to deploy.
-- [TODO] Stage 5 — deploy (5a boot, 5b console/ioctl via nexutil, 5c monitor mode +
-  tcpdump cross-checked against wlan0, 5d injection cross-checked against wlan0).
+- [IN PROGRESS] Stage 5 — deploy. `scripts/deploy265.sh` / `scripts/revert265.sh` written
+  and both tested (revert-while-stock-was-already-loaded confirmed the mechanism works
+  and re-attaches cleanly, before ever loading the patched image).
+  - [DONE] 5a boot: first deploy attempt succeeded outright -
+    `Firmware: BCM4345/6 wl0: ... version 7.45.265 (28bca26 CY nexmon.org: 1065-dirty-1)`,
+    no TRAP/corrupted/not-responding. wlan1 attached, wlan0 management link undisturbed.
+  - [TODO] 5b console/ioctl via nexutil (need to build nexutil on the Pi first -
+    libnexio then nexutil, libnl-3-dev already installed in Stage 0).
+  - [TODO] 5c monitor mode + tcpdump, cross-checked against wlan0 (mt7921 can capture
+    the same air independently).
+  - [TODO] 5d injection, cross-checked against wlan0.
 - [TODO] Stage 6 — `wlc_monitor_amsdu_patch` address (optional, only after 5c/5d pass).
 
 Next concrete action: Stage 5, deploy (5a boot check first).
