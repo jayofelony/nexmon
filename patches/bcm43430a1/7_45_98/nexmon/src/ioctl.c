@@ -52,6 +52,10 @@ extern unsigned int nex_rx_frames;
 /* Main-loop iterations; defined in autostart.c. */
 extern unsigned int nex_loop_count;
 
+/* Per-frame rxfill; defined in monitormode.c. */
+extern unsigned int nex_rxfill_perframe;
+extern unsigned int nex_rxfill_calls;
+
 /* Heartbeat state. All initialised so they land in .data, not .bss. */
 unsigned int nex_hb_seq = 0;
 unsigned int nex_hb_armed = 0;
@@ -340,9 +344,9 @@ nex_heartbeat(struct hndrte_timer *t)
         unsigned int lc = nex_loop_count;
         unsigned int dloop = lc - nex_hb_lastloop;
         nex_hb_lastloop = lc;
-        printf("NEXHB %u rx=%u dcyc=%u dloop=%u is=%x iabr=%x ispr=%x icsr=%x\n",
+        printf("NEXHB %u rx=%u dcyc=%u dloop=%u is=%x ispr=%x fill=%u\n",
                ++nex_hb_seq, nex_rx_frames, dcyc, dloop, mis,
-               NVIC_IABR0, NVIC_ISPR0, ICSR);
+               NVIC_ISPR0, nex_rxfill_calls);
     }
 }
 
@@ -780,6 +784,17 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
 
                 printf("NEXDWT c%u addr=%x mask=%u func=%x\n",
                        n, addr, mask, DWT_FUNC(n));
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
+        case 618: // arg[0]=1 -> repost an RX descriptor on every received frame
+            if (len >= 4) {
+                unsigned int *out = (unsigned int *) arg;
+                nex_rxfill_perframe = out[0] ? 1 : 0;
+                nex_rxfill_calls = 0;
+                printf("NEXHB rxfill_perframe=%u\n", nex_rxfill_perframe);
+                out[0] = nex_rxfill_perframe;
                 ret = IOCTL_SUCCESS;
             }
             break;

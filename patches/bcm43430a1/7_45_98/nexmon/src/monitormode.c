@@ -122,9 +122,39 @@ wl_monitor_radiotap(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p)
  */
 unsigned int nex_rx_frames = 0;
 
+/* Per-frame RX descriptor replenishment.
+ *
+ * The wedge tracks received frames, not hops or elapsed time: across runs that
+ * failed anywhere from hop 7 to hop 11, rx froze at 38-39 every single time.
+ * ~40 is the size of a DMA receive descriptor ring, which suggests each frame
+ * consumes a descriptor that is never reposted - so the ring empties, the next
+ * frame overflows the FIFO, MI_RXOV latches and the overflow storms IRQ 0.
+ *
+ * dma_rxfill() is what reposts them. Calling it once per second from the
+ * heartbeat already made the RXOV flag clearable but was far too infrequent to
+ * keep the ring populated. This calls it where the descriptor is actually
+ * consumed - on every frame, in the RX path.
+ *
+ * Runtime-gated by ioctl 618 so both arms are the same firmware image.
+ * hw->di[] is the per-FIFO dma_info array at wlc_hw_info+0x14; RX is di[0].
+ */
+unsigned int nex_rxfill_perframe = 0;
+unsigned int nex_rxfill_calls = 0;
+
 void
 wl_monitor_hook(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p) {
     nex_rx_frames++;
+
+    if (nex_rxfill_perframe && wl->wlc) {
+        volatile unsigned int *hw = (volatile unsigned int *) wl->wlc->hw;
+        if (hw) {
+            void *rxdi = (void *) hw[0x14 / 4];
+            if (rxdi) {
+                dma_rxfill(rxdi);
+                nex_rxfill_calls++;
+            }
+        }
+    }
 
     switch(wl->wlc->monitor & 0xFF) {
         case MONITOR_RADIOTAP:

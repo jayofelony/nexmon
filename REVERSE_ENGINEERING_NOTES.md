@@ -2071,3 +2071,83 @@ Next concrete step: dump the RX DMA registers for `hw->di[0]` (rcv control and
 status - `dma_rx`/`dma_rxfill` are now relocated for this firmware, `0x56b0`
 and `0x58ac`) and look for a status bit that stays asserted through the wedge.
 That is the thing to clear.
+
+## THE REAL INVARIANT: ~40 received frames, not hops, not channels, not time
+
+Everything in this file framed as a "channel hopping wedge" is mis-framed.
+Hopping was never the trigger; it only ever mattered because it generates
+received frames.
+
+### Hop count is not the invariant - the frame count is
+
+Across ten valid runs the failure lands anywhere from hop 7 to hop 11, but the
+frame counter freezes at the same place every time:
+
+    run         fail at hop   rx before   frozen at
+    bg80shdyr        7            37          39
+    bn1tfwpjv        8            38          39
+    bwz4c6g5m        9            38          39
+    bei78horv       10            38          39
+    bv87axk07       10            37          39
+    b4ytaxk8w       10            38          39
+    bads0xjta       10            38          39
+    bj2ly6c8e       11            38          39
+    blsixw07n       11            37          38
+
+"Hop 10" was a coincidence of this RF environment: about two frames arrive per
+hop here, so ~40 frames happens to be ~10 hops.
+
+### Hop *rate* changes nothing, because it does not change frames per hop
+
+Re-measured with the passive probe (`case 613`), since the original
+rate-independence finding used `case 612` and was contaminated:
+
+    interval=2s   first failure hop 10   elapsed 32s
+    interval=5s   first failure hop 10   elapsed 62s
+
+Same hop count, double the wall clock. Slowing the hop rate is **not** a
+workaround, and the frames-per-hop stayed at ~2 regardless of dwell time.
+
+### Hopping is not required at all
+
+The decisive control - fixed channel 6, no channel change whatsoever:
+
+    t=5s  rx=28   t=35s rx=34   t=56s rx=38
+    t=10s rx=29   t=40s rx=35   t=63s NOREPLY
+    t=25s rx=32   t=51s rx=37   WEDGED at t=71s with NO hops
+
+Frozen at `rx=39`, `dloop=0`, `is=100`, `ispr=18f` - the identical wedge,
+identical signature, zero hops. **This also retires "fixed channel is stable
+indefinitely"**, which appears earlier in this file: it is only stable for as
+long as it takes a quiet channel to deliver forty frames.
+
+### The failing channel is not a channel
+
+Across all runs the first failure occurred on channels 1, 2, 4, 5, 8, 9, 10 and
+11 - eight different channels, no clustering. Not a regulatory-domain effect.
+Note the hop sequence used here is `(i % 11) + 1`, so channels **12 and 13 were
+never exercised**; an ETSI-domain device hopping to 12/13 is untested and is a
+separate question.
+
+### Per-frame dma_rxfill does not help
+
+If ~40 were the RX descriptor ring and frames consumed descriptors that were
+never reposted, calling `dma_rxfill(hw->di[0])` on every frame should have
+fixed it. It does not:
+
+    perframe=1   first failure hop 11   rx frozen at 39   fill=39
+
+`fill=39` confirms it really was called once per frame. So either the ring is
+not the exhausted resource, or `dma_rxfill` had nothing to post - it needs
+buffers and free ring slots, and its return value was not checked here, which
+is the first thing to fix if this line is picked up again.
+
+### What this means
+
+The chip dies on approximately the fortieth frame delivered to the monitor
+hook, under every condition tested. That is an extremely tight bound on a fixed
+resource of size ~40 that is consumed per frame and never returned. Finding
+what has forty of something in the receive path is now the whole problem, and
+`dma_attach`'s `nrxd`/`nrxpost` arguments are the obvious place to start
+looking - they are the ring sizing parameters, and `dma_attach` already has a
+wrapper entry (though not yet for this firmware version).
