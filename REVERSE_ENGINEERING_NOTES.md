@@ -1927,3 +1927,75 @@ with "Operation not possible due to RF-kill"), and reading the phy index from
 
 The Pi has no RTC and its clock runs hours behind the host, so correlate by
 relative time in the logs rather than by wall clock.
+
+## DEAD END: the ARM debug hardware is unusable on this chip
+
+Both routes to a PC sampler were tried and both kill the firmware. They fail
+for the same underlying reason, so neither is worth retrying.
+
+### Low memory cannot be read, which rules out the vector table
+
+`VTOR` reads `0`, so the vector table is nominally at address 0. It cannot be
+copied, because that memory cannot be read:
+
+    0x0    ->  00000000 00000000 00000000 00000000   (reads, all zero)
+    0x10   ->  *** chip dead from here on ***
+
+Reading `0x10` through `0xFF` **kills the firmware outright** - the following
+`case 613` returns the no-reply artefact and never recovers. Reads at `0x100`
+and above are perfectly fine and return a dense table of odd (Thumb) pointers:
+
+    0x100  =  00019a0d 00024b8b 00024be7 000245f5
+    0x140  =  0002414d 000249bd 00002239 00002235
+    0x1c0  =  00017a19 00017a15 00017a1f 0001a709
+    0x300  =  00034247 0003423b 00034263 0003422d
+
+So whatever backs `0x00..0xFF` is not ordinary RAM, and the exception vectors
+proper are exactly the part that cannot be touched. Note nexmon patches at
+`0x2c40` (`b_hndrte_idle`) work fine, so this is a narrow window near zero, not
+low RAM generally.
+
+Attempting the relocation anyway - copy 256 entries from 0 into an aligned
+table in the patch region, patch entry 15, set `VTOR` - **bricks the chip the
+instant it is armed**, exactly as that unreadable source implies. The code is
+left in `ioctl.c` `case 616` as a disabled record, since "relocate the vector
+table" is the obvious thing to reach for.
+
+### DWT watchpoints kill it too
+
+The fallback was to avoid exceptions entirely: arm a DWT comparator in PC-match
+mode (`FUNCTION=4`) and *poll* its `MATCHED` bit (bit 24, clears on read) from
+the heartbeat, giving a hardware "did this range execute" probe with no vector
+involved. Four comparators are present and unused.
+
+Configuration works - `NEXDWT c0 addr=5ff94 mask=8 func=4` - but the chip dies
+on the first match. Isolated cleanly by arming a comparator on `nex_heartbeat`
+itself, which runs every second:
+
+    heartbeats logged before arming:    6
+    heartbeats logged 6s after arming:  6
+    ... NEXHB 5 ...
+    ... NEXDWT c0 addr=5ff94 mask=8 func=4
+    (nothing further)
+
+With `MON_EN` clear in `DEMCR` and no halting debugger attached, a watchpoint
+debug event has nowhere to go and locks the core. Enabling `MON_EN` would
+vector to `0x30` - back inside the unreadable window.
+
+**Conclusion: no DWT watchpoint, no DebugMonitor, no SysTick handler, no PC
+sampling.** The DWT *counters* remain fine, because they are read-only and
+generate no debug events - `CYCCNT` produced the 81.6M measurement and can keep
+being used.
+
+### What is left for finding the spin
+
+Software instrumentation only, guided by the call map:
+
+1. Nexmon already hooks `hndrte_idle` (`b_hndrte_idle` at `0x2c40`, see
+   `autostart.c`). Counting calls to it through a wedge is cheap and directly
+   informative: the core never sleeps during the wedge, so if idle is still
+   being reached the loop is cycling and finding work each pass, and if it is
+   not, the loop is stuck inside a single call.
+2. Beyond that, bisect with `BLPatch` counters at candidate sites from
+   `buildtools/fwmap` - one build per candidate, but it depends on no debug
+   hardware and cannot brick the chip the way the above does.

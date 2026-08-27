@@ -125,6 +125,85 @@ unsigned int nex_rxov_clear = 0;
 unsigned int nex_rxov_seen = 0;
 unsigned int nex_rxov_fill = 0;
 
+/* ---------------------------------------------------------------------------
+ * SysTick PC sampler
+ *
+ * Two candidate spin loops have now been excluded by measurement after looking
+ * convincing in disassembly (the MAC-suspend busy-wait at 0x210b0, then the
+ * RXOV path). Rather than nominate a third, sample the program counter and let
+ * it say where the core actually is.
+ *
+ * SysTick is unused by this firmware - CTRL reads 0x4, RELOAD 0 - so taking it
+ * over costs nothing. The handler records the PC that the exception stacked,
+ * i.e. the address the core was executing when the tick fired. While the chip
+ * spins at 100% CPU, essentially every sample lands in the spinning code.
+ *
+ * The vector table is NOT patched in place. VTOR reads 0, so the table lives at
+ * address 0, but reads of low RAM have repeatedly destabilised this chip and
+ * that region is handed to the heap by the reclaim. Instead a copy is built
+ * here in the patch region and VTOR is pointed at it, leaving the original
+ * untouched. Every existing vector is copied verbatim; only entry 15, SysTick,
+ * is replaced, and that entry reads 0 in the original because nothing uses it.
+ *
+ * Cortex-M3 requires the table to be aligned to a power of two at least as
+ * large as its size, and to at least 128 bytes: 256 entries = 1024 bytes, so
+ * 1024-byte alignment.
+ */
+#define NEX_NVEC        256
+#define VTOR            (*(volatile unsigned int *) 0xE000ED08)
+#define SYST_CSR        (*(volatile unsigned int *) 0xE000E010)
+#define SYST_RVR        (*(volatile unsigned int *) 0xE000E014)
+#define SYST_CVR        (*(volatile unsigned int *) 0xE000E018)
+#define SYST_ENABLE     (1u << 0)
+#define SYST_TICKINT    (1u << 1)
+#define SYST_CLKSOURCE  (1u << 2)
+
+unsigned int nex_vectors[NEX_NVEC] __attribute__((aligned(1024))) = { 0 };
+unsigned int nex_vtor_on = 0;
+unsigned int nex_pc_sample = 0;
+unsigned int nex_pc_count = 0;
+
+/* DWT comparators. Four are present (DWT_CTRL NUMCOMP = 4) and unused.
+ * MATCHED is bit 24 of DWT_FUNCTIONn and clears when the register is read, so
+ * reading it once per heartbeat answers "did this range execute during the
+ * last beat" with no exception and no vector table involved. */
+#define DWT_COMP(n)     (*(volatile unsigned int *) (0xE0001020 + (n) * 0x10))
+#define DWT_MASK(n)     (*(volatile unsigned int *) (0xE0001024 + (n) * 0x10))
+#define DWT_FUNC(n)     (*(volatile unsigned int *) (0xE0001028 + (n) * 0x10))
+#define DWT_FN_PCMATCH  0x4
+#define DWT_MATCHED     (1u << 24)
+
+unsigned int nex_dwt_armed = 0;
+unsigned int nex_dwt_hits = 0;
+
+/* Naked: the compiler must not emit a prologue, or the stacked exception frame
+ * would no longer be at the stack pointer we read. The frame layout on entry is
+ * r0,r1,r2,r3,r12,lr,pc,xpsr - so the interrupted PC is at +24.
+ *
+ * movw/movt rather than "ldr rN,=sym" so no literal pool is needed inside a
+ * naked function. Bit 2 of EXC_RETURN selects which stack was in use.
+ */
+__attribute__((naked, used)) static void
+nex_systick_handler(void)
+{
+    __asm__ volatile (
+        "tst    lr, #4                      \n"
+        "ite    eq                          \n"
+        "mrseq  r0, msp                     \n"
+        "mrsne  r0, psp                     \n"
+        "ldr    r0, [r0, #24]               \n"
+        "movw   r1, #:lower16:nex_pc_sample \n"
+        "movt   r1, #:upper16:nex_pc_sample \n"
+        "str    r0, [r1]                    \n"
+        "movw   r1, #:lower16:nex_pc_count  \n"
+        "movt   r1, #:upper16:nex_pc_count  \n"
+        "ldr    r2, [r1]                    \n"
+        "adds   r2, #1                      \n"
+        "str    r2, [r1]                    \n"
+        "bx     lr                          \n"
+    );
+}
+
 /* Periodic heartbeat, printed to the firmware console.
  *
  * The point of printing rather than answering an ioctl: once the chip wedges,
@@ -223,9 +302,20 @@ nex_heartbeat(struct hndrte_timer *t)
         }
     }
 
-    printf("NEXHB %u rx=%u dcyc=%u is=%x ov=%u fill=%u clr=%u\n",
+    /* One read per armed comparator; the read is what clears MATCHED, so each
+     * beat reports only what executed since the previous beat. */
+    {
+        unsigned int n, hits = 0;
+        for (n = 0; n < 4; n++)
+            if (nex_dwt_armed & (1u << n))
+                if (DWT_FUNC(n) & DWT_MATCHED)
+                    hits |= (1u << n);
+        nex_dwt_hits = hits;
+    }
+
+    printf("NEXHB %u rx=%u dcyc=%u is=%x ov=%u dwt=%x armed=%x\n",
            ++nex_hb_seq, nex_rx_frames, dcyc, mis, nex_rxov_seen,
-           nex_rxov_fill, nex_rxov_clear);
+           nex_dwt_hits, nex_dwt_armed);
 }
 
 int
@@ -603,6 +693,65 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
                     }
                 }
                 out[0] = nex_hb_armed;
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
+        case 616: // relocate the vector table and start the SysTick PC sampler
+            /* arg[0] = SysTick reload in core cycles, 0 for the default. The
+             * core runs at 81.6MHz (from the boot banner), so 816000 is ~10ms,
+             * i.e. 100 samples/second - frequent enough to characterise a spin
+             * without the handler itself becoming load.
+             *
+             * Deliberately opt-in and one-shot: an unused build behaves exactly
+             * as before, and re-arming cannot install the table twice.
+             */
+            /* DISABLED - this bricks the chip, see REVERSE_ENGINEERING_NOTES.md.
+             *
+             * VTOR reads 0, so the vector table is nominally at address 0, but
+             * the low region cannot be read: `case 600` returns zeros for
+             * offset 0 and *kills the firmware outright* from 0x10 upward.
+             * The copy therefore captured nothing usable, and pointing VTOR at
+             * it killed the chip the instant it was armed.
+             *
+             * Left here as a record rather than deleted, because "relocate the
+             * vector table" is an obvious thing to reach for and it does not
+             * work on this chip. Whatever backs addresses 0x00-0xFF is not
+             * ordinary readable RAM.
+             */
+            ret = IOCTL_ERROR;
+            break;
+
+        case 617: // DWT execution probe: did any code in a range run?
+            /* The vector-table route is closed, so instead of taking an
+             * exception, use the DWT comparators' MATCHED bit, which can simply
+             * be polled. Setting FUNCTION to 4 arms a PC-match watchpoint;
+             * MATCHED (bit 24) latches when the comparator fires and clears on
+             * read. No debug exception, no vector, nothing to install.
+             *
+             * With four comparators and a range mask this bisects: ask "did
+             * anything in this 32KB region execute since the last beat", four
+             * regions at a time, then narrow.
+             *
+             *   arg[0] = comparator index 0..3
+             *   arg[1] = address to match
+             *   arg[2] = mask, as log2 of the size to ignore (0 = exact match,
+             *            8 = 256 bytes, 15 = 32KB)
+             */
+            if (len >= 12) {
+                unsigned int *in = (unsigned int *) arg;
+                unsigned int n = in[0] & 3;
+                unsigned int addr = in[1];
+                unsigned int mask = in[2] & 0x1f;
+
+                DEMCR |= DEMCR_TRCENA;          /* DWT is dead without this */
+                DWT_COMP(n) = addr;
+                DWT_MASK(n) = mask;
+                DWT_FUNC(n) = DWT_FN_PCMATCH;
+                nex_dwt_armed |= (1u << n);
+
+                printf("NEXDWT c%u addr=%x mask=%u func=%x\n",
+                       n, addr, mask, DWT_FUNC(n));
                 ret = IOCTL_SUCCESS;
             }
             break;
