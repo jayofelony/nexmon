@@ -1710,6 +1710,83 @@ its RX path is the ROM routine, whereas 7.45.98 runs the RAM reimplementation
 at `0xd4e4` reached via the stock flashpatch at `0x81f410`. If 41.46 simply
 never overflows, the fix belongs in that RAM RX path rather than in the mask.
 
+## TRAP: never touch the D11 registers through `struct d11regs`
+
+`struct d11regs` in `structs.common.h` is declared `__attribute__((packed))`.
+GCC therefore cannot assume its fields are aligned and **decomposes every
+access into bytes**. This:
+
+    nex_hb_wlc->regs->macintstatus = MI_RXOV;
+
+compiles to four byte transactions against a memory-mapped, write-1-to-clear
+hardware register:
+
+    ldrb.w r6,[r0,#296] / strb.w r6,[r0,#296]   <- byte 0
+    strb.w ip,[r0,#297]                         <- byte 1
+    strb.w r6,[r0,#298] / strb.w r6,[r0,#299]   <- bytes 2,3
+
+where the vendor's own ISR uses a single `str`. This cost five wasted runs: the
+byte writes killed the SDIO card mid-test every single time
+(`bad CIS tuple`, `error -22`, `Failed to initialize a non-removable card`),
+which looked exactly like the device instability seen elsewhere in this file
+and was initially attributed to it. With the access forced to a single word,
+**SDIO deaths went from one per run to zero**.
+
+Reads come back coherent in practice - every `maccontrol`/`macintstatus` value
+recorded above was read this way and decoded sensibly - so existing read-only
+probes such as `case 604` are not suspect. Writes are another matter. Use:
+
+    #define D11REG(regs, off) \
+        (*(volatile unsigned int *) ((unsigned int) (regs) + (off)))
+    #define D11_MACCONTROL 0x120
+    #define D11_MACCOMMAND 0x124
+    #define D11_MACINTSTATUS 0x128
+    #define D11_MACINTMASK 0x12c
+
+and check the disassembly afterwards - `ldr.w`/`str.w` with `#296`, no `strb`.
+
+## RULED OUT: clearing MI_RXOV does not fix the wedge
+
+With the register access corrected, the two arms are finally comparable. Same
+firmware image both times, arm selected at runtime by `case 615`, run from a
+fresh boot with `setup.sh` (no `rmmod`/`modprobe`, which is itself a cause of
+SDIO failures on this device):
+
+| arm | first failure | RXOV seen | heartbeat | CPU | SDIO deaths |
+|---|---|---|---|---|---|
+| `clr=0` observe only | hop 10 | ov=51 | survives | 81.6M | 0 |
+| `clr=1` clear the bit | hop 11 | **ov=52** | survives | 81.6M | 0 |
+
+`ov=52` confirms the clear executed fifty-two times. `macintstatus` still read
+`0x100` on every subsequent beat, and the wedge arrived on schedule.
+
+**So the bit cannot be cleared by writing it back, and clearing it would not
+help anyway.** Either bit 8 is not write-1-to-clear, or - far more likely - the
+RX FIFO is still in overflow and the PSM re-raises it immediately. The latched
+bit is a *symptom* of an overflow that has already happened; the receive path
+is held down by the FIFO/DMA state behind it, not by the status bit.
+
+### What that leaves
+
+Recovery has to act on the FIFO, not the flag. The vendor's `wlc_rxov_int()`
+never touches `macintstatus` directly either - it throttles TX and backs off,
+letting the receive path drain:
+
+    wlc_set_txmaxpkts(wlc, wlc->rxov_txmaxpkts);
+    wl_add_timer(wlc->wl, wlc->rxov_timer, wlc->rxov_delay, FALSE);
+    wlc->rxov_delay = MIN(wlc->rxov_delay*2, RXOV_TIMEOUT_MAX);
+
+Worth trying next, in order of cost:
+
+1. Find what drains or resets the RX FIFO after an overflow on this chip - the
+   RX DMA reset path is the obvious candidate - and call it from the heartbeat
+   when `MI_RXOV` is seen. Same cheap experimental shape as this one.
+2. Establish why 7.45.41.46 never gets here at all. It has the same masks, so
+   either it does not overflow or it recovers. Its RX path is the ROM routine,
+   whereas 7.45.98 runs the RAM reimplementation at `0xd4e4` reached via the
+   stock flashpatch at `0x81f410` - that difference remains the best lead, and
+   diffing how each drains the receive FIFO is the concrete question.
+
 ### Earlier idea, now superseded
 
 Everything so far says the wl thread stops while the chip around it stays

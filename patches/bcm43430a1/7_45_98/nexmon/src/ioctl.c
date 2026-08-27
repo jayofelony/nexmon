@@ -68,6 +68,36 @@ struct wlc_info *nex_hb_wlc = 0;
  *
  * TRCENA in DEMCR has to be set before the DWT block responds at all.
  */
+/* macintstatus bit 8. Named MI_NSPECGEN_1 in Broadcom's d11.h and aliased
+ * there to MI_RXOV, "rxfifo overflow interrupt" - set by the PSM. */
+#define MI_RXOV         (1u << 8)
+
+/* NEVER touch the D11 registers through struct d11regs.
+ *
+ * That struct is declared __attribute__((packed)) in structs.common.h, so GCC
+ * cannot assume its fields are aligned and decomposes every access into bytes.
+ * A plain "regs->macintstatus = MI_RXOV" compiles to four strb.w's:
+ *
+ *   ldrb.w r6,[r0,#296] / strb.w r6,[r0,#296]   <- byte 0
+ *   strb.w ip,[r0,#297]                         <- byte 1
+ *   strb.w r6,[r0,#298] / strb.w r6,[r0,#299]   <- bytes 2,3
+ *
+ * Four byte transactions against a memory-mapped, write-1-to-clear hardware
+ * register, where the vendor's own ISR uses a single 32-bit str. Reads come
+ * back coherent in practice, but writes are not safe and must not be done this
+ * way.
+ *
+ * These force a single aligned word access instead. Offsets are from
+ * struct d11regs: maccontrol 0x120, maccommand 0x124, macintstatus 0x128,
+ * macintmask 0x12c.
+ */
+#define D11REG(regs, off) \
+    (*(volatile unsigned int *) ((unsigned int) (regs) + (off)))
+#define D11_MACCONTROL    0x120
+#define D11_MACCOMMAND    0x124
+#define D11_MACINTSTATUS  0x128
+#define D11_MACINTMASK    0x12c
+
 #define DEMCR           (*(volatile unsigned int *) 0xE000EDFC)
 #define DWT_CTRL        (*(volatile unsigned int *) 0xE0001000)
 #define DWT_CYCCNT      (*(volatile unsigned int *) 0xE0001004)
@@ -75,6 +105,24 @@ struct wlc_info *nex_hb_wlc = 0;
 #define DWT_CYCCNTENA   (1u << 0)
 
 unsigned int nex_hb_lastcyc = 0;
+
+/* When nonzero, the heartbeat clears MI_RXOV out of macintstatus every time it
+ * sees it set, and counts how often it had to.
+ *
+ * MI_RXOV (bit 8, "rxfifo overflow", per Broadcom's d11.h) is never in this
+ * firmware's interrupt mask - measured im=m5c=0xbae7a864 with bit 8 clear -
+ * and the ISR at ROM 0x8563ec only ever acknowledges bits that ARE in the
+ * mask, so once the PSM sets it the bit latches forever. The question this
+ * answers is whether that latched bit is what holds the receive path down, or
+ * merely a marker left behind by an overflow that has already done the damage.
+ *
+ * macintstatus is write-1-to-clear: the ISR acknowledges by writing the bits
+ * back (str r6,[r7,#0x128]), so writing 0x100 clears just this bit and leaves
+ * every other pending bit untouched. Nothing is unmasked, so no interrupt that
+ * has no handler can start firing.
+ */
+unsigned int nex_rxov_clear = 0;
+unsigned int nex_rxov_seen = 0;
 
 /* Periodic heartbeat, printed to the firmware console.
  *
@@ -105,8 +153,7 @@ unsigned int nex_hb_lastcyc = 0;
 static void
 nex_heartbeat(struct hndrte_timer *t)
 {
-    unsigned int mis = 0, mim = 0;
-    unsigned int m5c = 0, m60 = 0, m64 = 0;
+    unsigned int mis = 0, m5c = 0;
     unsigned int cyc, dcyc;
 
     /* Unsigned subtraction, so a 32-bit wrap of CYCCNT still yields the right
@@ -139,17 +186,24 @@ nex_heartbeat(struct hndrte_timer *t)
          */
         volatile unsigned int *hw = (volatile unsigned int *) nex_hb_wlc->hw;
 
-        mis = nex_hb_wlc->regs->macintstatus;
-        mim = nex_hb_wlc->regs->macintmask;
-        if (hw) {
+        /* Only m5c is still worth reporting. macintmask, hw+0x60 and hw+0x64
+         * were measured across a full healthy-to-wedged run and never moved
+         * (bae7a864, bae7a864, 0), so they are established rather than
+         * observed now. */
+        mis = D11REG(nex_hb_wlc->regs, D11_MACINTSTATUS);
+        if (hw)
             m5c = hw[0x5c / 4];
-            m60 = hw[0x60 / 4];
-            m64 = hw[0x64 / 4];
+
+        if (mis & MI_RXOV) {
+            nex_rxov_seen++;
+            if (nex_rxov_clear)
+                D11REG(nex_hb_wlc->regs, D11_MACINTSTATUS) = MI_RXOV;
         }
     }
 
-    printf("NEXHB %u rx=%u dcyc=%u is=%x im=%x m5c=%x m60=%x m64=%x\n",
-           ++nex_hb_seq, nex_rx_frames, dcyc, mis, mim, m5c, m60, m64);
+    printf("NEXHB %u rx=%u dcyc=%u is=%x ov=%u clr=%u m5c=%x\n",
+           ++nex_hb_seq, nex_rx_frames, dcyc, mis, nex_rxov_seen,
+           nex_rxov_clear, m5c);
 }
 
 int
@@ -527,6 +581,19 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
                     }
                 }
                 out[0] = nex_hb_armed;
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
+        case 615: // arg[0]=1 -> heartbeat clears MI_RXOV; 0 -> only observes it
+            /* Both arms in one build, so the comparison is between two runs of
+             * the same firmware rather than between two images. */
+            if (len >= 4) {
+                unsigned int *out = (unsigned int *) arg;
+                nex_rxov_clear = out[0] ? 1 : 0;
+                nex_rxov_seen = 0;
+                printf("NEXHB rxov_clear=%u\n", nex_rxov_clear);
+                out[0] = nex_rxov_clear;
                 ret = IOCTL_SUCCESS;
             }
             break;
