@@ -1787,7 +1787,73 @@ Worth trying next, in order of cost:
    stock flashpatch at `0x81f410` - that difference remains the best lead, and
    diffing how each drains the receive FIFO is the concrete question.
 
-### Earlier idea, now superseded
+## dma_rxfill makes the RXOV latch clearable - but does not end the wedge
+
+`dma_rx` and `dma_rxfill` had **no `FW_VER_7_45_98` entry** in `wrapper.c`,
+only `7_45_41_26` and `7_45_41_46`. Calling either would have silently compiled
+to a no-op stub - the exact bug class this file documents. Relocated with
+`buildtools/fwmap/relocate.py`, unique at every signature length up to 96B,
+with prologues instruction-for-instruction identical to 41.46's:
+
+    dma_rx      41.46 0x4F30  ->  7.45.98 0x56b0
+    dma_rxfill  41.46 0x515C  ->  7.45.98 0x58ac
+
+Neither has any static caller in either version - the DMA ops are dispatched
+indirectly through the `di` vtable - so the call map cannot corroborate these,
+and the disassembly comparison is the evidence. Both are now in `wrapper.c`.
+Verified in the built image: `bl 58ac <dma_rxfill>`, not a stub.
+
+`hw->di[]` is the per-FIFO `dma_info` array at `wlc_hw_info+0x14`, RX being
+`di[0]`.
+
+### Result: the flag becomes clearable, the wedge does not lift
+
+Calling `dma_rxfill(hw->di[0])` before writing `MI_RXOV` back:
+
+    NEXHB 50  is=100  ov=29 fill=29
+    NEXHB 51  is=0    ov=29 fill=29   <- clears, and stays clear
+    NEXHB 52  is=0    ov=29 fill=29
+    NEXHB 53  is=0    ov=29 fill=29
+    NEXHB 54  is=100  ov=30 fill=30   <- re-raises, cleared again
+    NEXHB 55  is=0    ov=30 fill=30
+
+Compare the clear-only arm, where `macintstatus` read `0x100` on **every** beat
+through 52 clears and never once went to zero. So reposting receive descriptors
+really does deassert the overflow: the condition behind the bit is being
+addressed, and `ov` fell from 51 to 30 across a comparable run.
+
+**But it does not fix anything that matters.** The wedge still arrived (hop 9),
+`rx` still froze at 39, and `dcyc` stayed pinned at 81.6M - 100% CPU - across
+every one of those beats, including the ones where `is` read 0.
+
+### What that tells us
+
+The RX FIFO overflow and the 100% CPU spin are **not the same problem**. The
+overflow is real, is what `MI_RXOV` reports, and is treatable with
+`dma_rxfill`. The spin persists with the flag clear, so whatever the core is
+burning cycles on is a separate stuck state - most likely the receive DMA ring
+left in a condition the dpc keeps retrying without progress. Refilling
+descriptors does not unstick it.
+
+This also retires the idea that unmasking `MI_RXOV` would have been a fix. The
+bit is now observed going 1 -> 0 -> 1 while the chip stays wedged throughout.
+
+### Where to go next
+
+The remaining question is what the core actually executes during the spin, and
+that is now worth answering directly rather than by inference - two previous
+candidate loops (MAC-suspend, RXOV) have both been excluded by measurement
+after looking convincing on paper.
+
+A PC sampler is the tool. SysTick is free on this chip (`CTRL=0x4`,
+`RELOAD=0`), and the vector table sits at 0 with real Thumb handlers visible
+from `0x100` onward, the low entries (SysTick at `0x3C`) reading zero because
+this firmware never uses them. Rather than writing into low RAM - reads there
+have repeatedly destabilised the chip - build a relocated table in the patch
+region, copy the existing one into it with a firmware-side `memcpy` from 0,
+install a SysTick handler that records the stacked PC from the exception
+frame, and point `VTOR` at the copy. The heartbeat can then print the sampled
+PC, and `buildtools/fwmap` turns that straight into a function.
 
 Everything so far says the wl thread stops while the chip around it stays
 healthy. The next thing worth knowing is whether that thread is **spinning or

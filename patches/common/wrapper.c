@@ -89,6 +89,11 @@ AT(CHIP_VER_BCM4339, FW_VER_ALL, 0x8c69c)
 AT(CHIP_VER_BCM43438, FW_VER_7_45_41_26_r640327, 0x4E44)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_26_r640327, 0x4E44)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x4F30)
+// relocated from FW_VER_7_45_41_46 (0x4F30) by byte-signature match, unique at
+// every length up to 96B; prologue is instruction-for-instruction identical.
+// No static callers in either version - the DMA ops are dispatched indirectly
+// through the di vtable, so a caller search cannot corroborate this one.
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x56b0)
 void *
 dma_rx(void *di)
 RETURN_DUMMY
@@ -97,6 +102,10 @@ AT(CHIP_VER_BCM4339, FW_VER_ALL, 0x8c6cc)
 AT(CHIP_VER_BCM43438, FW_VER_7_45_41_26_r640327, 0x5070)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_26_r640327, 0x5070)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x515C)
+// relocated from FW_VER_7_45_41_46 (0x515C) by byte-signature match, unique at
+// every length up to 96B; prologue is instruction-for-instruction identical.
+// Indirectly dispatched like dma_rx, so no static callers to corroborate.
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x58ac)
 void *
 dma_rxfill(void *di)
 RETURN_DUMMY

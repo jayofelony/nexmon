@@ -123,6 +123,7 @@ unsigned int nex_hb_lastcyc = 0;
  */
 unsigned int nex_rxov_clear = 0;
 unsigned int nex_rxov_seen = 0;
+unsigned int nex_rxov_fill = 0;
 
 /* Periodic heartbeat, printed to the firmware console.
  *
@@ -153,7 +154,7 @@ unsigned int nex_rxov_seen = 0;
 static void
 nex_heartbeat(struct hndrte_timer *t)
 {
-    unsigned int mis = 0, m5c = 0;
+    unsigned int mis = 0;
     unsigned int cyc, dcyc;
 
     /* Unsigned subtraction, so a 32-bit wrap of CYCCNT still yields the right
@@ -186,24 +187,45 @@ nex_heartbeat(struct hndrte_timer *t)
          */
         volatile unsigned int *hw = (volatile unsigned int *) nex_hb_wlc->hw;
 
-        /* Only m5c is still worth reporting. macintmask, hw+0x60 and hw+0x64
-         * were measured across a full healthy-to-wedged run and never moved
-         * (bae7a864, bae7a864, 0), so they are established rather than
-         * observed now. */
+        /* The mask words are no longer reported: measured across a full
+         * healthy-to-wedged run they never moved (m5c=bae7a864, m60=bae7a864,
+         * m64=0, macintmask=bae7a864), so they are established rather than
+         * observed. The line's budget is better spent on the recovery counters. */
         mis = D11REG(nex_hb_wlc->regs, D11_MACINTSTATUS);
-        if (hw)
-            m5c = hw[0x5c / 4];
 
         if (mis & MI_RXOV) {
             nex_rxov_seen++;
-            if (nex_rxov_clear)
+            if (nex_rxov_clear) {
+                /* Clearing the status bit alone was measured to do nothing:
+                 * 52 clears, macintstatus still 0x100 on every beat, wedge on
+                 * schedule. The bit is a symptom - the PSM re-raises it while
+                 * the receive FIFO is still overflowed - so recovery has to
+                 * act on the FIFO.
+                 *
+                 * dma_rxfill() reposts receive descriptors, which is what an
+                 * overflow leaves short. hw->di[] is the per-FIFO dma_info
+                 * array at wlc_hw_info+0x14 and RX is di[0].
+                 *
+                 * Both dma_rx and dma_rxfill had no FW_VER_7_45_98 address
+                 * until now - they would have compiled to silent no-op stubs.
+                 * Relocated from 7.45.41.46 by byte signature (unique to 96B,
+                 * prologues identical) and added to wrapper.c.
+                 */
+                if (hw) {
+                    void *rxdi = (void *) hw[0x14 / 4];
+                    if (rxdi) {
+                        dma_rxfill(rxdi);
+                        nex_rxov_fill++;
+                    }
+                }
                 D11REG(nex_hb_wlc->regs, D11_MACINTSTATUS) = MI_RXOV;
+            }
         }
     }
 
-    printf("NEXHB %u rx=%u dcyc=%u is=%x ov=%u clr=%u m5c=%x\n",
+    printf("NEXHB %u rx=%u dcyc=%u is=%x ov=%u fill=%u clr=%u\n",
            ++nex_hb_seq, nex_rx_frames, dcyc, mis, nex_rxov_seen,
-           nex_rxov_clear, m5c);
+           nex_rxov_fill, nex_rxov_clear);
 }
 
 int
@@ -592,6 +614,7 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
                 unsigned int *out = (unsigned int *) arg;
                 nex_rxov_clear = out[0] ? 1 : 0;
                 nex_rxov_seen = 0;
+                nex_rxov_fill = 0;
                 printf("NEXHB rxov_clear=%u\n", nex_rxov_clear);
                 out[0] = nex_rxov_clear;
                 ret = IOCTL_SUCCESS;
