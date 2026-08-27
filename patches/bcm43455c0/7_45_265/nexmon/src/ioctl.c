@@ -47,7 +47,7 @@
 
 #define NULL 0
 
-int 
+int
 wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
 {
     int ret = IOCTL_ERROR;

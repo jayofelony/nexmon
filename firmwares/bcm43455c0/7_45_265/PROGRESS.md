@@ -83,10 +83,29 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
     matches exactly. No TRAP, no garbage/all-zero-MAC frames, no wrong-RSSI issue -
     none of the defects the 43430a1 port hit. wl_monitor (0x1A323C, the port's
     weakest pre-build address) is now fully hardware-confirmed.
-  - [TODO] 5d injection, cross-checked against wlan0.
+  - [DONE] 5d injection. First attempt (wrong-channel wlan1mon vs wlan0mon after a
+    fresh reload reset wlan1mon to channel 36) showed zero received frames -
+    misdiagnosed as a possible firmware bug. Root-caused with a temporary counter+
+    ioctl diagnostic (case 512, dbg_wl_send_hook_calls/dbg_inject_frame_calls) added
+    to injection.c/ioctl.c: it proved wl_send_hook and inject_frame both fired 1:1 for
+    every injected frame, `hdr0` matched, before either interface's channel was even
+    checked - meaning the software path was correct and the failure was purely RF
+    (channel mismatch), not a wrong address or a firmware bug. After aligning both
+    monitor vifs to channel 40, 20/20 injected marker frames were received
+    independently by the mt7921. **Debug instrumentation removed and clean image
+    rebuilt+redeployed+re-verified end-to-end** (ioctl/monitor/injection all retested
+    on the final committed source, all still pass: ioctl returns "wlc_ioctl_hook",
+    monitor mode captured 321 beacons, injection delivered 20/20 marker frames).
+    wl_send (0x1A2830) and the wl_send_hook slot (0x200E20) are now fully
+    hardware-confirmed.
+
+All four Stage 5 sub-steps (5a/5b/5c/5d) pass on the final clean build. Monitor mode
+and frame injection both work; only Stage 6 (wlc_monitor_amsdu_patch, low-value/
+optional) remains.
 - [TODO] Stage 6 — `wlc_monitor_amsdu_patch` address (optional, only after 5c/5d pass).
 
-Next concrete action: Stage 5, deploy (5a boot check first).
+Next concrete action: Stage 6 (optional, low-value) or call it done - core port is
+fully working and hardware-verified.
 
 Plan file: `/home/jayofelony/.claude/plans/i-need-you-to-bubbly-bonbon.md` (all address
 tables, confidence levels, and verification commands live there — this file only tracks
