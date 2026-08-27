@@ -71,8 +71,18 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
     runtime console-dump path in this port's ioctl.c to probe them live); already
     confirmed pre-build by disassembly (both sites held the expected
     `mov.w rX, #1024` pattern - see stage 2 commit).
-  - [TODO] 5c monitor mode + tcpdump, cross-checked against wlan0 (mt7921 can capture
-    the same air independently).
+  - [DONE] 5c monitor mode. `/home/pi/mon.sh` (persistent) does rfkill unblock -> wlan1
+    up -> read phy from /sys/class/net/wlan1/phy80211/name -> iw phy $PHY interface add
+    wlan1mon type monitor -> wlan1mon up -> wlan1 down -> nexutil -Iwlan1mon -m2, in
+    that order (vif before mode, per the 43430a1 lesson). Worked on the first attempt:
+    40-frame tcpdump capture decoded cleanly (correct band/rate/frequency, plausible
+    -40 to -69dBm signal, sane frame types - BA/RTS/CTS - and MAC addresses, including
+    the local wlan0 adapter's own MAC as a peer). A second capture on the AP's channel
+    (40, 5200MHz) decoded beacons with the correct SSID "Jachtkamp18" in the clear.
+    Cross-checked against `iw dev wlan0 scan`: BSSID 94:2a:6f:7a:b9:75 at 5200MHz
+    matches exactly. No TRAP, no garbage/all-zero-MAC frames, no wrong-RSSI issue -
+    none of the defects the 43430a1 port hit. wl_monitor (0x1A323C, the port's
+    weakest pre-build address) is now fully hardware-confirmed.
   - [TODO] 5d injection, cross-checked against wlan0.
 - [TODO] Stage 6 — `wlc_monitor_amsdu_patch` address (optional, only after 5c/5d pass).
 
