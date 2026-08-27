@@ -56,8 +56,21 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
   - [DONE] 5a boot: first deploy attempt succeeded outright -
     `Firmware: BCM4345/6 wl0: ... version 7.45.265 (28bca26 CY nexmon.org: 1065-dirty-1)`,
     no TRAP/corrupted/not-responding. wlan1 attached, wlan0 management link undisturbed.
-  - [TODO] 5b console/ioctl via nexutil (need to build nexutil on the Pi first -
-    libnexio then nexutil, libnl-3-dev already installed in Stage 0).
+  - [DONE] 5b ioctl via nexutil. Built natively on the Pi in ~/nexmon-build
+    (libnexio -> nexutil; also needed utilities/libargp, not mentioned in the old
+    43430a1 notes - nexutil.c includes argp-extern.h from there even on the native
+    Linux build path). Installed to /usr/local/bin/nexutil (persistent, survives
+    reboot unlike /tmp). `nexutil -Iwlan1 -g510 -l64 -r` returns exactly
+    "wlc_ioctl_hook" (case 510's argprintf of __FUNCTION__) - confirms the
+    wlc_ioctl_hook slot (0x20B988) is live. `-g511 -l512 -r` walks
+    wlc->dumpcb_head and dumps real structured firmware state (VHT capability
+    info) - confirms argprintf/bcm_binit/bcm_bprintf and the struct wlc_info
+    layout are all correct on real hardware. Note: nexutil's default -l (buffer
+    length) is 4 bytes and silently truncates output - always pass -l explicitly.
+    console.c's two mov-immediate patches remain statically verified only (no
+    runtime console-dump path in this port's ioctl.c to probe them live); already
+    confirmed pre-build by disassembly (both sites held the expected
+    `mov.w rX, #1024` pattern - see stage 2 commit).
   - [TODO] 5c monitor mode + tcpdump, cross-checked against wlan0 (mt7921 can capture
     the same air independently).
   - [TODO] 5d injection, cross-checked against wlan0.
