@@ -777,7 +777,6 @@ brcmf_cfg80211_nexmon_set_channel(struct wiphy *wiphy, struct net_device *, stru
 	struct brcmf_if *ifp = netdev_priv(cfg_to_ndev(cfg));
 	s32 err = 0;
 	u16 chanspec;
-	int i;
 
 	//brcmf_err("DEBUG NexMon: brcmf_cfg80211_nexmon_set_channel() called!\n");
 
@@ -799,22 +798,24 @@ brcmf_cfg80211_nexmon_set_channel(struct wiphy *wiphy, struct net_device *, stru
 	}
 
 	chanspec = chandef_to_chanspec(&cfg->d11inf, chandef);
-	/* The chanspec iovar can time out (-110/ETIMEDOUT) transiently when
-	 * the firmware is busy (e.g. under heavy TX load), and previously
-	 * this always returned 0 regardless of the actual outcome - callers
-	 * like bettercap's channel hopper had no way to know a hop silently
-	 * failed and the radio stayed on the old channel. Retry a few times
-	 * and propagate the real result.
+
+	/* Propagate the real result: this used to return 0 unconditionally, so
+	 * a caller like bettercap's channel hopper had no way to know a hop
+	 * silently failed and the radio stayed on the old channel.
+	 *
+	 * Deliberately no retry loop here. Of the errors this can return only
+	 * -ETIMEDOUT is transient, and it already costs DCMD_RESP_TIMEOUT
+	 * (2500ms) plus a brcmf_sdio_checkdied() console dump per attempt, so
+	 * retrying would block this cfg80211 op for >7s without fixing
+	 * anything. -EBADE (firmware rejected the chanspec, e.g. a width or
+	 * channel the CLM disallows), -EIO (bus down), -EPERM and -EINVAL are
+	 * all deterministic, and -ERESTARTSYS has to reach the caller. This
+	 * matches the other "chanspec" set sites in this file.
 	 */
-	for (i = 0; i < 3; i++) {
-		err = brcmf_fil_iovar_int_set(ifp, "chanspec", chanspec);
-		if (!err)
-			break;
-		brcmf_err("Set Channel failed: chspec=%d, %d (attempt %d/3)\n",
-			  chanspec, err, i + 1);
-		if (i < 2)
-			msleep(20);
-	}
+	err = brcmf_fil_iovar_int_set(ifp, "chanspec", chanspec);
+	if (err)
+		brcmf_err("Set Channel failed: chspec=%d, %d\n", chanspec, err);
+
 	return err;
 }
 #endif
@@ -7759,6 +7760,9 @@ struct brcmf_cfg80211_info *brcmf_cfg80211_attach(struct brcmf_pub *drvr,
 		goto priv_out;
 	}
 	cfg->d11inf.io_type = (u8)io_type;
+	brcmf_err("DEBUG: BRCMF_C_GET_VERSION raw io_type=%d (0x%x), truncated=%u (D11N=%d D11AC=%d)\n",
+		  io_type, io_type, cfg->d11inf.io_type,
+		  BRCMU_D11N_IOTYPE, BRCMU_D11AC_IOTYPE);
 	brcmu_d11_attach(&cfg->d11inf);
 
 	/* regulatory notifer below needs access to cfg so

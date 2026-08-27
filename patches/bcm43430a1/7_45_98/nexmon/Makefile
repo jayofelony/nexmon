@@ -190,9 +190,6 @@ ifeq ($(shell uname -m),$(filter $(shell uname -m), armv6l armv7l aarch64))
 	@printf "\033[0;31m  COPYING\033[0m brcmfmac43430-sdio.bin => /lib/firmware/brcm/brcmfmac43430-sdio.bin\n"
 	$(Q)cp brcmfmac43430-sdio.bin /lib/firmware/brcm/brcmfmac43430-sdio.bin
 	$(Q)cp brcmfmac43430-sdio.bin /lib/firmware/brcm/brcmfmac43436s-sdio.bin
-	$(Q)rm -rf /lib/firmware/brcm/brcmfmac43430-sdio.clm_blob
-	$(Q)rm -rf /lib/firmware/brcm/brcmfmac43430-sdio.raspberrypi,3-model-b.clm_blob
-	$(Q)rm -rf /lib/firmware/brcm/brcmfmac43430-sdio.raspberrypi,model-zero-w.clm_blob
 ifneq ("$(wildcard $(DRIVER_FOLDER_NAME)/brcmfmac.ko)", "")
 	@for module in $$(lsmod | grep "^brcmfmac" | awk '{print $$1}'); do \
 		printf "\033[0;31m  UNLOADING\033[0m $$module\n"; \
@@ -200,29 +197,12 @@ ifneq ("$(wildcard $(DRIVER_FOLDER_NAME)/brcmfmac.ko)", "")
 	done
 	$(Q)modprobe brcmutil
 	@printf "\033[0;31m  RELOADING\033[0m brcmfmac\n"
-	$(Q)insmod $(DRIVER_FOLDER_NAME)/brcmfmac.ko
+	$(Q)insmod $(DRIVER_FOLDER_NAME)/brcmfmac.ko debug=0x131016
 else
 	$(warning Warning: Driver not compiled)
 endif
 else
 	$(warning Warning: Cannot install firmware on this arch., bcm43430-sdio.bin needs to be copied manually into /lib/firmware/brcm/ on your RPI3)
-endif
-
-install-remote-firmware: brcmfmac43430-sdio.bin brcmfmac.ko
-	@printf "\033[0;31m  COPYING\033[0m brcmfmac43430-sdio.bin => /lib/firmware/brcm/brcmfmac43430-sdio.bin\n"
-	$(Q)sshpass -p nexmon scp brcmfmac43430-sdio.bin root@192.168.1.231:/lib/firmware/brcm/brcmfmac43430-sdio.bin
-#ifeq ($(shell sshpass -p nexmon ssh root@192.168.1.231 'lsmod | grep "^brcmfmac" | wc -l'), 1)
-	@if [ `sshpass -p nexmon ssh root@192.168.1.231 'lsmod | grep "^brcmfmac" | wc -l'` -eq 1 ]; then \
-		printf "\033[0;31m  UNLOADING\033[0m brcmfmac\n"; \
-		sshpass -p nexmon ssh root@192.168.1.231 'rmmod brcmfmac'; \
-	fi
-#endif
-ifneq ("$(wildcard $(DRIVER_FOLDER_NAME)/brcmfmac.ko)", "")
-	$(Q)sshpass -p nexmon ssh root@192.168.1.231 'modprobe brcmutil'
-	@printf "\033[0;31m  RELOADING\033[0m brcmfmac\n"
-	$(Q)sshpass -p nexmon ssh root@192.168.1.231 'insmod $(DRIVER_FOLDER_NAME)/brcmfmac.ko'
-else
-	$(warning Warning: Driver not compiled)
 endif
 
 clean-firmware: FORCE

@@ -818,8 +818,17 @@ static int brcmf_net_mon_open(struct net_device *ndev)
 	}
 	
 	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_MONITOR, monitor);
-	if (err)
+	if (err) {
 		bphy_err(drvr, "BRCMF_C_SET_MONITOR error (%d)\n", err);
+		return err;
+	}
+
+	/* NEXMON: monitor mode alone doesn't open the hardware RX filter to
+	 * unassociated/foreign traffic; without promiscuous mode the D11 MAC
+	 * silently drops everything that isn't for our own (nonexistent) BSS. */
+	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PROMISC, 1);
+	if (err)
+		bphy_err(drvr, "BRCMF_C_SET_PROMISC error (%d)\n", err);
 
 	return err;
 }
@@ -832,6 +841,8 @@ static int brcmf_net_mon_stop(struct net_device *ndev)
 	int err;
 
 	brcmf_dbg(TRACE, "Enter\n");
+
+	brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_PROMISC, 0);
 
 	monitor = 0;
 	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_MONITOR, monitor);
