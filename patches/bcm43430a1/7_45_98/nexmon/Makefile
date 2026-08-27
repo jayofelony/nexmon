@@ -205,23 +205,6 @@ else
 	$(warning Warning: Cannot install firmware on this arch., bcm43430-sdio.bin needs to be copied manually into /lib/firmware/brcm/ on your RPI3)
 endif
 
-install-remote-firmware: brcmfmac43430-sdio.bin brcmfmac.ko
-	@printf "\033[0;31m  COPYING\033[0m brcmfmac43430-sdio.bin => /lib/firmware/brcm/brcmfmac43430-sdio.bin\n"
-	$(Q)sshpass -p nexmon scp brcmfmac43430-sdio.bin root@192.168.1.231:/lib/firmware/brcm/brcmfmac43430-sdio.bin
-#ifeq ($(shell sshpass -p nexmon ssh root@192.168.1.231 'lsmod | grep "^brcmfmac" | wc -l'), 1)
-	@if [ `sshpass -p nexmon ssh root@192.168.1.231 'lsmod | grep "^brcmfmac" | wc -l'` -eq 1 ]; then \
-		printf "\033[0;31m  UNLOADING\033[0m brcmfmac\n"; \
-		sshpass -p nexmon ssh root@192.168.1.231 'rmmod brcmfmac'; \
-	fi
-#endif
-ifneq ("$(wildcard $(DRIVER_FOLDER_NAME)/brcmfmac.ko)", "")
-	$(Q)sshpass -p nexmon ssh root@192.168.1.231 'modprobe brcmutil'
-	@printf "\033[0;31m  RELOADING\033[0m brcmfmac\n"
-	$(Q)sshpass -p nexmon ssh root@192.168.1.231 'insmod $(DRIVER_FOLDER_NAME)/brcmfmac.ko'
-else
-	$(warning Warning: Driver not compiled)
-endif
-
 clean-firmware: FORCE
 	@printf "\033[0;31m  CLEANING\033[0m\n"
 	$(Q)rm -fr $(RAM_FILE) obj gen log src/ucode_compressed.c src/templateram.c ucode_compressed.bin

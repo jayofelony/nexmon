@@ -114,48 +114,8 @@ wl_monitor_radiotap(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p)
         wl_sendup_newdrv(wl, 0, p_new, 1);
 }
 
-/* Frames seen by the monitor hook since boot. Read out by ioctl 613 and
- * reported by the heartbeat in ioctl.c, so that "did the chip stop receiving"
- * and "did the chip stop executing" can be told apart during a wedge.
- * Deliberately initialised, so it lands in .data (which is stored in the
- * image) rather than .bss, whose contents are not guaranteed here.
- */
-unsigned int nex_rx_frames = 0;
-
-/* Per-frame RX descriptor replenishment.
- *
- * The wedge tracks received frames, not hops or elapsed time: across runs that
- * failed anywhere from hop 7 to hop 11, rx froze at 38-39 every single time.
- * ~40 is the size of a DMA receive descriptor ring, which suggests each frame
- * consumes a descriptor that is never reposted - so the ring empties, the next
- * frame overflows the FIFO, MI_RXOV latches and the overflow storms IRQ 0.
- *
- * dma_rxfill() is what reposts them. Calling it once per second from the
- * heartbeat already made the RXOV flag clearable but was far too infrequent to
- * keep the ring populated. This calls it where the descriptor is actually
- * consumed - on every frame, in the RX path.
- *
- * Runtime-gated by ioctl 618 so both arms are the same firmware image.
- * hw->di[] is the per-FIFO dma_info array at wlc_hw_info+0x14; RX is di[0].
- */
-unsigned int nex_rxfill_perframe = 0;
-unsigned int nex_rxfill_calls = 0;
-
 void
 wl_monitor_hook(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p) {
-    nex_rx_frames++;
-
-    if (nex_rxfill_perframe && wl->wlc) {
-        volatile unsigned int *hw = (volatile unsigned int *) wl->wlc->hw;
-        if (hw) {
-            void *rxdi = (void *) hw[0x14 / 4];
-            if (rxdi) {
-                dma_rxfill(rxdi);
-                nex_rxfill_calls++;
-            }
-        }
-    }
-
     switch(wl->wlc->monitor & 0xFF) {
         case MONITOR_RADIOTAP:
                 wl_monitor_radiotap(wl, sts, p);
@@ -200,43 +160,44 @@ wl_monitor_hook(struct wl_info *wl, struct wl_rxsts *sts, struct sk_buff *p) {
 __attribute__((at(0xd716, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)))
 BLPatch(wl_monitor_ram_call, wl_monitor_hook);
 
-/* 7.45.98 leaks one packet buffer per received frame.
+/* 7.45.98 skips pkt_buf_free_skb on received frames; NOP the branch that does.
  *
  * The caller of the RX routine ends one of two ways:
  *
  *   1619e:  mov r0,r7 / mov r1,r5 / movs r2,#0
- *   161a8:  b.w 0x6c74               <- pkt_buf_free_skb, returns the buffer
- *   161ac:  ldmia.w sp!, {...,pc}    <- plain return, buffer NOT freed
+ *   161a8:  b.w 0x6c74              <- pkt_buf_free_skb, returns the buffer
+ *   161ac:  ldmia.w sp!, {...,pc}   <- plain return, buffer NOT freed
  *
  * and 7.45.98 adds a branch, immediately after the RX routine returns, that
  * takes the second one:
  *
- *   1609e:  bl 0xd4e4               <- RX routine (ends in the wl_monitor call)
+ *   1609e:  bl 0xd4e4              <- RX routine, ends in the wl_monitor call
  *   160a2:  ldr.w r3,[r4,#0x208]
  *   160a6:  cbz r3, 0x160b2
  *   160a8:  ldr r3,[r4,#0]
  *   160aa:  ldrb.w r3,[r3,#0x3f]
  *   160ae:  cmp r3,#0
- *   160b0:  beq.n 0x161ac           <- skip the free
- *   160b2:  ldrh r3,[r6,#16]        <- normal path, reaches the free
+ *   160b0:  beq.n 0x161ac          <- skip the free
+ *   160b2:  ldrh r3,[r6,#16]       <- normal path, reaches the free
  *
- * 7.45.41.46's equivalent (0x12c20) has no such branch and always reaches the
- * free, which is why it never wedges.
+ * 7.45.41.46's equivalent function (0x12c20) has no such branch and always
+ * reaches the free, which is why it never wedges.
  *
- * That matches the measured behaviour exactly: the chip dies after ~40 received
- * frames under every condition tested - fixed channel or hopping, any hop rate,
- * any channel, and in monitor mode 4 where the frame is discarded at the hook -
- * because the leak is in the caller, upstream of anything nexmon does. ~40 is
- * the packet buffer pool; once it is empty the receive FIFO overflows, MI_RXOV
- * latches, and the unacknowledged overflow storms IRQ 0.
+ * Without this patch the chip dies after ~40 received frames under every
+ * condition: fixed channel or hopping, any hop rate, any channel, and in
+ * monitor mode 4 where the frame is discarded at the hook - because the leak is
+ * in the caller, upstream of anything nexmon does. Once the packet buffers are
+ * gone the receive FIFO overflows, MI_RXOV latches in macintstatus, and because
+ * MI_RXOV is not in this firmware's interrupt mask the ISR can never
+ * acknowledge it, so the overflow storms IRQ 0 and the core never reaches its
+ * idle loop again. With the patch: 20,000+ frames on a fixed channel and 60/60
+ * channel hops, with no wedge.
  *
- * NOPping the branch makes the early exit unreachable, so every frame reaches
- * pkt_buf_free_skb, as on 41.46. 0xbf00 is "nop".
- *
- * Caveat worth re-checking: osh[0], the outstanding-packet count, read 0-1
- * throughout the runs rather than climbing to ~40, which is not what a buffer
- * leak should look like. Either that counter does not track these buffers or
- * this branch is not taken as often as the reasoning above assumes.
+ * 0xbf00 is "nop". See REVERSE_ENGINEERING_NOTES.md for the full derivation,
+ * including two caveats: the branch condition ([r4+0x208] != 0 &&
+ * [[r4]+0x3f] == 0) has not been decoded, so if it marks frames freed
+ * elsewhere this would convert a leak into a double free; and osh[0] never
+ * reflected the leak, so it does not track this pool.
  */
 __attribute__((at(0x160b0, "", CHIP_VER_BCM43430a1, FW_VER_7_45_98)))
 GenericPatch2(rx_leak_no_early_exit, 0xbf00);
