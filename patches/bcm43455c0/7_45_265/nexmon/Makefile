@@ -33,7 +33,7 @@ CFLAGS= \
 	-DTIME_PTR=$(TIME_PTR) \
 	-DGIT_VERSION=\"$(GIT_VERSION)\" \
 	-DBUILD_NUMBER=\"$$(cat BUILD_NUMBER)\" \
-	-Wall -Werror -Wno-unused-variable -Wno-unused-function -O2 -nostdlib -nostartfiles -ffreestanding -mthumb -fno-align-functions -march=$(NEXMON_ARCH) \
+	-Wall -Werror -Wno-unused-variable -Wno-unused-function -Wno-address-of-packed-member -O2 -nostdlib -nostartfiles -ffreestanding -mthumb -fno-align-functions -march=$(NEXMON_ARCH) \
 	-ffunction-sections -fdata-sections \
 	-I$(NEXMON_ROOT)/patches/include \
 	-Iinclude \

@@ -30,15 +30,23 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
   - `0x20B988` holds `0x203b9` (wlc_ioctl+1) and `0x200E20` holds `0x1a2831`
     (wl_send+1) - both exact.
   All five addresses check out; none needed correction from the planning-stage values.
-- [TODO] Stage 3 — build (`make clean && make firmware-only`), sanity-check image size
-  and diffed regions against stock.
+- [DONE] Stage 3 — build. Hit one real (non-address) bug: the 234_CY Makefile we based
+  ours on dropped `-Wno-address-of-packed-member` (234_CY never compiles radiotap.c,
+  since it has no monitor mode; our port does). Fixed by adding the flag back. Clean
+  build after that. Verified: image size exactly matches stock (609309B); no linker
+  errors (only expected gc-sections notes); version string shows
+  `7.45.265 (28bca26 CY nexmon.org: ...)`; full byte-diff against stock shows 36378
+  changed bytes and **zero unexplained** - every one falls inside the ucode/patch/
+  fp_config regions or a known GenericPatch4 slot. Added
+  `patches/bcm43455c0/7_45_265/nexmon/.gitignore` (matching the `7_45_98` precedent) to
+  keep the built binary and BUILD_NUMBER untracked.
 - [TODO] Stage 4 — wrapper audit (`gen/nexmon.pre` DUMMY cross-check); loop with Stage 2
   until clean. Do not deploy until this passes.
 - [TODO] Stage 5 — deploy (5a boot, 5b console/ioctl via nexutil, 5c monitor mode +
   tcpdump cross-checked against wlan0, 5d injection cross-checked against wlan0).
 - [TODO] Stage 6 — `wlc_monitor_amsdu_patch` address (optional, only after 5c/5d pass).
 
-Next concrete action: Stage 3, build the patch.
+Next concrete action: Stage 4, wrapper audit.
 
 Plan file: `/home/jayofelony/.claude/plans/i-need-you-to-bubbly-bonbon.md` (all address
 tables, confidence levels, and verification commands live there — this file only tracks
