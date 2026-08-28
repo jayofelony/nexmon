@@ -2228,3 +2228,329 @@ and `iw dev wlan0mon set channel` returned `No such device (-19)` while
 netdev rather than the named interface. That disagreement between the two tools
 is the tell. Always verify the add succeeded before setting monitor mode, and
 treat a missing netdev as needing cleanup rather than as nothing to clean.
+
+## bcm43455c0 / 7.45.265 port — full port done, monitor mode + injection working on hardware
+
+New chip/rig session, done end-to-end in one sitting (2026-08-28). Target device is a
+Raspberry Pi 4B (`pi`/`raspberry`, passwordless sudo, kernel `6.18.39+rpt-rpi-v8`), and
+the rig has an out-of-band management link that the 43430a1 session never had: an
+AWUS036AXM USB adapter (`wlan0`, `mt7921u`) carries SSH on `192.168.1.131` while `wlan1`
+(the BCM43455 being patched) is completely free to reload, wedge, or reboot without
+losing the session. That single change eliminated most of the operational overhead the
+43430a1 notes above describe (no watchdog-reboot races, no waiting for `/tmp` to survive
+a crash loop, no power-cycle dependency).
+
+### Choosing the right reference firmware — do not go by version number alone
+
+This chip's `firmwares/bcm43455c0/` had five existing ports (154, 189, 206, 241,
+234_4ca95bb_CY) before 265. **241 is a trap**: it is numerically closest to 265 but is a
+different, older build lineage - its feature string (`lpc-pwropt-43455_ftrs`, no
+`gtkoe`/`txbf`/`dpp`) matches 154/206, not 265. `234_4ca95bb_CY`'s feature string
+(`...wfds-mfp-dfsradar-wowlpf-...-gtkoe-roamprof-txbf-ve-*sae-dpp-sr-okc-bpd`) is nearly
+identical to 265's. Byte-signature relocation run 234_CY -> 265 landed cleanly with a
+uniform local delta (-0x5380 in the 0x1A2xxx band); the same relocations attempted from
+241 would have been relocating from the wrong lineage entirely. **Always diff the
+firmware's feature string (`strings *.bin | grep roml`) between candidate references
+before picking one to relocate from - the version number is not a reliable proxy for
+which build shares layout.**
+
+234_CY itself only ships a console+ioctl patch (no monitor mode), while 206 has the full
+monitor+injection patch but is on the wrong lineage for 265. The fix: take the *build
+scaffolding* (Makefile, definitions.mk shape, version.c's `VERSION_PTR_1..4` macro form)
+from 234_CY since it matches 265's structure, and take the *patch sources*
+(monitormode.c/injection.c/sendframe.c/ioctl.c/console.c) from 206 since that is the most
+recent full-featured reference. Retarget every address via 234_CY->265 relocation, not
+206->265.
+
+### A self-testing derivation script beat hand-relocating every address
+
+Rather than relocate each `definitions.mk` entry individually and hope, wrote
+`firmwares/bcm43455c0/7_45_265/derive.py`: it locates each value by *structural*
+signature (the ucode magic bytes, the fixed tail pattern after
+`HNDRTE_RECLAIM_0_END`, the six aligned slots equal to `FP_CONFIG_ORIGBASE`, the version/
+date/time string slots) rather than by copying a byte offset from a similar-looking
+build. Before ever computing 265's values, it re-derives the *already-known* values for
+206/234_CY/241 and asserts they match - so a bug in the derivation logic fails loudly on
+firmwares whose answer is already known, instead of silently producing a wrong answer
+for the new one. All three self-tests passed on the first correct version of the script,
+and every one of 265's derived values matched what independent manual analysis (done
+during planning, before any code was written) had already found. This is worth doing for
+any future port in this chip family - the method generalizes, only the structural
+signatures need adapting per-chip.
+
+### Wrapper relocation confirmed itself as a side effect, for the weakest-evidence address
+
+`wl_monitor` only matched a 16-byte signature going from 234_CY to 265 (`0x1A85BC` ->
+`0x1A323C`), the weakest evidence of any address in this port. Rather than trusting it on
+signature length alone, disassembled it - and it turned out to internally call `bl
+0x19a0f8` (the just-independently-verified `memcpy` relocation) and tail-call `b.w
+0x1a2f68` (the just-independently-verified `wl_sendup` relocation). Three separately
+"weak" pieces of evidence turned out to corroborate each other through the actual code
+structure. **When a relocated address's own body calls other addresses you've also just
+relocated, disassemble it - internal consistency between unrelated relocations is much
+stronger evidence than any single signature match, and it's free once you're already
+looking at the disassembly.**
+
+### Compiler-flag gap from blending two Makefiles - not an address bug
+
+First build failed with `-Werror=address-of-packed-member` in
+`patches/common/radiotap.c`. Not a relocation problem: 234_CY's Makefile (the base for
+this port's scaffolding) dropped `-Wno-address-of-packed-member` because 234_CY has no
+monitor mode and never compiles `radiotap.c`; this port's `monitormode.c`/`injection.c`
+pull it in via `ieee80211_radiotap.h`, so the flag is needed again. Restored it from
+206's Makefile. **When blending a Makefile from one reference port with patch sources
+from another, diff the two Makefiles' `CFLAGS` explicitly - a flag that looks unrelated
+to addresses can still break the build for reasons specific to which source files each
+reference actually compiles.**
+
+### Wrapper audit clean on the first build
+
+Ran the same audit as the 43430a1 session
+(`grep DUMMY gen/nexmon.pre` vs `nm -D gen/patch.elf | awk '$2=="W"'`, ignoring
+`b_flash_patch_*`) after the first successful build: zero real findings. All 33 actually-
+called wrapped functions resolved; none of the 43430a1-style silently-missing-wrapper
+bugs occurred in this port. Whether that is because 234_CY/206 already carry more
+complete `wrapper.c` coverage for this chip than 43430a1 did at the time, or because this
+session's `derive.py`-first approach caught the gaps before they could compile silently,
+is not established - but the audit is cheap and mechanical, and running it before every
+deploy (not just once) cost nothing and confirmed nothing regressed across three rebuilds.
+
+### First deploy attempt booted clean - no wrapper-address surprises on real hardware
+
+Unlike the 43430a1 port (which needed several rounds of crash -> byte-signature-fix ->
+retest before RX worked), this port's first hardware deploy showed:
+
+    Firmware: BCM4345/6 wl0: ... version 7.45.265 (28bca26 CY nexmon.org: ...)
+
+immediately - no `TRAP`, no `dongle is not responding`, no corrupted-image message. The
+nexmon suffix in the version string is itself a correctness proof for `VERSION_PTR_1..4`/
+`DATE_PTR`/`TIME_PTR` and the patch region placement, since it can only appear if those
+four pointer slots actually got overwritten to point at the patch's own version string
+and the patch/ucode/flash-patch regions didn't corrupt each other.
+
+### Live ioctl validation without needing a raw memory-read ioctl this time
+
+The `wlc_ioctl_hook`'s own existing debug cases (`510`: `argprintf("%s\n",
+__FUNCTION__)`, `511`: walk `wlc->dumpcb_head` and dump each registered debug callback)
+turned out to be a complete, zero-extra-code way to validate the ioctl hook live:
+`nexutil -Iwlan1 -g510 -l64 -r` returning exactly `"wlc_ioctl_hook"` proves the
+`GenericPatch4` slot, `argprintf`, and the ioctl dispatch path all work; `-g511` returning
+real structured VHT capability info proves `bcm_binit`/`bcm_bprintf` and the `struct
+wlc_info` layout are correct against the live chip, not just the static image. Didn't
+need the 43430a1 session's `case 603` manual-memcpy ROM-dump technique at all for this
+port - useful to remember that a full raw-memory-read ioctl is not always necessary if
+the existing patch source already has a debug ioctl case that touches the addresses in
+question.
+
+**Gotcha carried over from the 43430a1 notes and reconfirmed here**: `nexutil`'s default
+`-l` (buffer length) is 4 bytes and silently truncates output with no error. Always pass
+`-l` explicitly and generously (e.g. `-l64`, `-l512`) - the first `-g510` attempt without
+it returned `"wlc "`, which looks like a working-but-wrong-string false negative rather
+than the truncation it actually was.
+
+Also needed for `nexutil` to build at all on this Debian-13-based Pi OS: not just
+`libnexio` (as the 43430a1 notes say) but `utilities/libargp` too -
+`utilities/nexutil/nexutil.c` includes `argp-extern.h` from there even on the native
+(non-Android) Linux build path, and that header doesn't exist anywhere else in the tree.
+
+### Monitor mode and injection both worked, following the 43430a1 vif-ordering lesson
+
+`/home/pi/mon.sh` on the device does, in order: `rfkill unblock all` -> `wlan1` up ->
+read the phy name from `/sys/class/net/wlan1/phy80211/name` (it increments every reload,
+same as the 43430a1 notes warn) -> `iw phy $PHY interface add wlan1mon type monitor` ->
+`wlan1mon` up -> `wlan1` down -> `nexutil -Iwlan1mon -m2`. Same order the 43430a1 session
+established as mandatory (vif before mode, or the driver refuses the interface). Worked
+first try: a `tcpdump` capture decoded correct band/rate/frequency, plausible signal
+levels, sane 802.11 frame types, and - on the AP's channel - beacons with the real SSID
+in the clear. Cross-checked against an independent `iw dev wlan0 scan` on the mt7921:
+same BSSID, same frequency. None of the 43430a1 port's monitor-mode defects (all-zero
+MACs from a bad `memcpy` relocation, wrong RSSI from a `struct wl_rxsts` layout mismatch)
+appeared here.
+
+### A misleading "injection is broken" false start - caused by RF setup, not the port
+
+First injection test (craft a probe request with scapy, `sendp()` it out `wlan1mon`,
+listen on a second monitor vif `wlan0mon` on the mt7921) showed **zero** received frames,
+which looked exactly like the kind of firmware-glue bug the 43430a1 port had for
+`wl_send`. Root-caused with a *counter*, not a console read: this kernel doesn't have
+`/sys/kernel/debug/dynamic_debug/control` available, so the driver's own
+`pr_debug("CONSOLE: %s\n", ...)` firmware-console poll (`brcmf_sdio_readconsole` in
+`sdio.c`) can't be turned on to see `printf()` output from patch code - the 43430a1
+session's live-printf method doesn't transfer to every kernel build. Instead, added two
+global counters (`wl_send_hook` calls, `inject_frame` calls) plus a spare debug ioctl
+case (`512`) to read them, reusing the *already-proven* `case 510`/`511` ioctl mechanism
+instead of chasing console access. Result: **both counters incremented 1:1 with every
+injected frame**, before any RF was even involved - meaning the entire software path
+(`wl_send_hook` -> `inject_frame` -> `sendframe`) was firing correctly on every attempt.
+The actual cause was mundane: a fresh `wlan1mon` after a firmware reload defaults to
+channel 36, while `wlan0mon` (inheriting from the already-associated `wlan0`) was on
+channel 40 - the two monitor vifs were simply not listening on the same channel. Aligning
+both to channel 40 made all 20/20 injected frames arrive at the independent capture
+immediately.
+
+**Takeaway for the next session**: when a live capture-based test shows nothing, check
+both endpoints' channel *before* suspecting the port. A counter-based liveness check
+(increment a global in the suspect hook, read it back via a spare debug ioctl case) is a
+fast, low-risk way to bisect "did my code run" from "did the RF actually work" without
+needing console access, and it reuses infrastructure (`argprintf`/custom ioctl cases)
+that's already proven to work rather than adding a new untested mechanism. The debug
+counters and ioctl case were removed and the clean image was rebuilt, redeployed, and
+fully re-verified (ioctl/monitor/injection all retested) before this was called done -
+never leave debug-only instrumentation in a build that hasn't been separately confirmed
+without it.
+
+### Session end state (2026-08-28): full port working, hardware-verified
+
+Working and verified live on hardware, on the final committed (debug-instrumentation-
+free) build: firmware boots with the correct patched version string; `wlc_ioctl_hook`
+confirmed via two independent debug ioctl cases; monitor-mode RX with correct radiotap
+decode, cross-checked against an independent capture device; frame injection with 20/20
+delivery, also cross-checked independently. `wlc_monitor_amsdu_patch` (A-MSDU frame
+suppression) is the one remaining gap - its address could not be relocated from either
+206 or 189 (relative-branch body, zero signature hits at any length) and is shipped
+disabled rather than guessed; see the `TODO(Stage 6)` comment in `monitormode.c`. It only
+affects A-MSDU frame handling in monitor mode, not RX/injection generally.
+
+## bcm43455c0 / 7.45.265 — DKMS-free driver, and the A-MSDU crash that looked like a channel-hopping bug
+
+Follow-up session (2026-08-28) checking four things explicitly asked for: the nexmon
+firmware buildable without DKMS, and that channel hopping and RX-FIFO-overflow - both
+real problems on the `bcm43430a1` port - are not present here.
+
+### The loaded driver was a third-party DKMS package, not this repo's - always check build-id
+
+Monitor mode and injection had worked perfectly in the previous session, but that was
+riding entirely on a pre-installed `brcmfmac-nexmon-dkms` package (`dkms status` showed
+`brcmfmac-nexmon/6.18.39+ndevfix1 ... installed`) - nothing from `patches/driver/` in
+this repo had actually been built or loaded yet. Easy to miss, since the symptom (monitor
+mode/injection working) looks identical either way.
+
+**How to tell them apart**: `sudo cat /sys/module/brcmfmac/notes/.note.gnu.build-id | xxd`
+against `readelf -n <your-built.ko>` - the GNU build-id is a content hash, so an exact
+match is a hard guarantee the loaded module is byte-for-byte your build, not just
+"probably the same source." `modinfo` wasn't installed on this Pi OS image, so this
+xxd-vs-readelf comparison is the fallback.
+
+**Building it (no DKMS)**: the driver tree at `patches/driver/brcmfmac_<KERNEL>.y-nexmon`
+is a complete, ordinary out-of-tree kernel module - it builds directly against the
+running kernel's headers:
+
+    ARCH=arm64 make -C /lib/modules/$(uname -r)/build M=$(pwd) -j4
+
+on the Pi itself (native aarch64, needs `linux-headers-<version>` installed - already
+present here). No cross-compiler, no nexmon gcc plugin, no DKMS wrapper - that machinery
+is only for the *firmware* half (`patches/<chip>/<fwver>/nexmon`'s `RAM_FILE` target),
+never the driver. It built clean on the first attempt against this repo's existing
+`patches/driver/brcmfmac_6.18.y-nexmon` source.
+
+**Making it load automatically (persistence without DKMS)**: `depmod`'s module search
+order prefers `/lib/modules/<kver>/updates/dkms/` over `/lib/modules/<kver>/kernel/...`,
+so `modprobe brcmfmac` was resolving to the DKMS copy specifically, not just "a"
+brcmfmac. Backed up that file, replaced it with an `xz`-compressed copy of the freshly
+built `.ko` at the exact same path, ran `depmod -a`, then proved persistence isn't just
+theoretical by `rmmod`ing and re-`modprobe`-ing (the same command a boot-time
+`systemd-udevd` triggers) and re-checking the build-id - it resolved to the new file
+correctly. A real reboot wasn't done (that's the one thing this doesn't prove), but the
+mechanism (`depmod`-registered path + module search order) is exactly what a reboot
+relies on too. **Caveat worth remembering**: if `dkms`/`apt` ever rebuild the DKMS
+package again (e.g. on a kernel upgrade), its postinst hook will overwrite this file back
+to the original - this is a one-time proof of DKMS-independence, not a permanent
+uninstall of the DKMS package.
+
+### A firmware crash that looked exactly like a channel-hopping bug, and wasn't one
+
+First channel-hop test (cycling 2.4GHz/5GHz channels while capturing) crashed the
+firmware within two hops:
+
+    ieee80211 phy: brcmf_fw_crashed: Firmware has halted or crashed
+    ...
+    brcmfmac: dongle trap info: type 0x1 @ epc 0x002280b8
+    lr 0x00228f65 ...
+
+**The trap PC is not where the bug is - it's downstream data corruption.** Disassembling
+around `epc 0x2280b8` showed a mechanical, repeating `ldrh/movs/movs/movs` pattern with
+no coherent control flow - the classic tell (see the byte-signature section earlier in
+this file) that execution landed in data, not code. Trap type `0x1` is exactly what an
+illegal-instruction/PC-into-garbage fault looks like on this core.
+
+**`lr` is what actually matters here.** `0x228f65 & ~1 = 0x228f64` (the low bit is the
+Thumb-mode marker on a `bl` return address, not part of the address) is the instruction
+immediately after a `bl 0x19a0f8` - the *already independently-confirmed* `memcpy`
+relocation from the previous session. Disassembling the function containing that call
+showed it was `hnd_pkt_dup_hook` from `monitormode.c`, matched instruction-for-instruction
+against the C source (`lb_alloc(p->len + sizeof(radiotap_hdr), 0)`, then
+`memcpy(pnew->data, p->data, p->len)`, then `osh->pktalloced++`) - i.e. a real,
+correctly-compiled function, not a stub. The crash is consistent with `memcpy` being
+handed a corrupt/huge `p->len` for some A-MSDU sub-frame and smashing adjacent memory
+(most likely the stack, given the eventual PC-into-garbage symptom on an unrelated later
+return).
+
+**This is exactly the bug `wlc_monitor_amsdu_patch` exists to route around** - the
+"Temporary fix to ignore A-MSDU frames" comment inherited from 206/189's source, whose
+address for 7.45.265 hadn't been relocated (byte-signature search returns nothing, same
+as for 206→265, because the block contains relative branches - see the earlier session's
+note on this in the same file). It had been left disabled and commented out as
+seemingly-low-risk ("only affects A-MSDU handling"). **It is not low-risk** - it is what
+stands between ordinary A-MSDU-aggregated traffic (common on any modern 5GHz/VHT
+network) and a firmware crash, and it just happens to look like a channel-hopping bug
+because different channels expose different traffic mixes, not because hopping itself is
+implicated.
+
+**Found by tracing forward from the ROM side, not by re-trying byte signatures.** The
+flashpatch redirect target for `hnd_pkt_dup_hook` (`0x25AF2`) is a ROM address and
+therefore chip-constant - identical across every firmware version of this stepping. Its
+*caller* (inside `wlc_monitor_amsdu`, in RAM) actually calls a small ROM thunk near it
+(`0x25AE8` in this chip, also chip-constant), so grepping the *265* RAM disassembly for
+`bl 0x25ae8` finds the call site directly, no signature matching needed:
+
+    206:  0x1b2a46: bl 0x25ae8   (patch site)   ->  0x1b2a62 (skip target), delta 0x1C
+    265:  0x1b3e6a: bl 0x25ae8   (patch site)   ->  0x1b3e86 (skip target), delta 0x1C
+
+The surrounding ~40 bytes of code are byte-identical in relative layout between the two
+versions, and the landing instruction at the skip target (`8a33  ldrh r3,[r6,#16]`) is
+*literally* the same encoding in both - about as strong a confirmation as this kind of
+relocation gets. Fixed:
+`__attribute__((at(0x1B3E6A, ...))) BPatch(wlc_monitor_amsdu_patch, 0x1B3E86);`
+
+**General technique worth keeping**: when byte-signature relocation fails because a
+block contains relative branches, and the block's job is "call some chip-constant ROM
+address," search the *target* firmware's disassembly for calls to that ROM address
+directly - it sidesteps the relative-branch problem entirely, since the ROM address
+being called doesn't move.
+
+### Channel hopping and RX-FIFO-overflow: neither reproduced, once the actual bug was fixed
+
+After the A-MSDU fix: 56 channel hops (8 full cycles across `1 6 11 36 40 44 48`,
+`iw ... set channel` + a live capture + an ioctl-liveness check after every single hop)
+completed with **zero failures and zero crashes** - `TOTAL_FRAMES=3667 FAILED_HOPS=0`. A
+separate sustained 45-second capture on the busiest channel (40) with no hopping
+delivered **14,222 frames, 0 dropped by kernel, 0 dmesg errors** - a volume more than two
+orders of magnitude past the "~40 frames" invariant that reliably wedged `bcm43430a1`
+(see the extensive investigation earlier in this file). Neither the driver-level
+`macintstatus`-spin wedge nor any RX-FIFO-overflow symptom appeared under either test.
+Whether that's because this chip's D11 core doesn't share `bcm43430a1`'s buffer-pool
+exhaustion bug, or because this port's RX/monitor path just doesn't hit whatever
+triggered it there, wasn't determined - not needed, since nothing wedged.
+
+**One more false alarm worth flagging for next time**: attempting to hop to channels
+149/153/157/161 during testing failed with `kernel reports: (extension) channel is
+disabled` / `command failed: Invalid argument (-22)`. This looked like it could be
+another hopping bug, but `iw reg get` showed the regulatory domain is `NL` (DFS-ETSI),
+which doesn't clear those channels for this device without a DFS CAC scan first - the
+rejection happens in the kernel's `cfg80211` layer, before the command ever reaches the
+firmware. **Always check `iw reg get` before treating an "unavailable channel" as a
+driver or firmware bug** - regulatory-domain restrictions and real hopping wedges produce
+superficially similar "can't get onto this channel" symptoms but are completely
+different layers.
+
+### Auto-recovery is real and worth trusting
+
+Before the A-MSDU fix was found, the very first crash auto-recovered on its own: the
+driver detected the halted firmware, ran its own SDIO `mmc_hw_reset` sequence (5 attempts,
+all individually reported "failed" in dmesg, which reads alarmingly but is normal - the
+resets are what re-triggers card re-enumeration), and the card came back
+(`mmc1: card 0001 removed` -> `new high speed SDIO card` -> firmware re-attached with the
+correct patched version string) with **no `rmmod`/`modprobe` needed, and no physical power
+cycle** - a meaningfully better failure mode than `bcm43430a1`'s SDIO wedges, which
+sometimes needed exactly that. Don't assume a crash means the session is over; check
+`ip -br link` and retry a liveness ioctl before reaching for recovery escalation.

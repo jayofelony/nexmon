@@ -1,4 +1,4 @@
-Reference firmware, not yet patch-ready.
+Ported. See `patches/bcm43455c0/7_45_265/`.
 
 - Source: `RPi-Distro/firmware-nonfree`, `debian/added-firmware/cypress/cyfmac43455-sdio-standard.bin`
 - Internal chip string: `43455c0-roml/...`
@@ -6,10 +6,12 @@ Reference firmware, not yet patch-ready.
 - Date: Tue 2023-08-29 01:51:02 PDT
 - Fetched: 2026-08-20
 
-Newer "standard" build than the already-patched `7_45_241` version in this
-repo (which is the "minimal" build, version `7.45.241`, dated 2021-11-01 -
-also present in `RPi-Distro/firmware-nonfree` if a minimal-build port is
-preferred instead). No `definitions.mk`/`structs.h`/patch code exists for
-this specific `7_45_265` build yet - the `7_45_241` and `7_45_234_4ca95bb_CY`
-directories in this same chip are the closest existing reference for what a
-port would need to produce.
+`definitions.mk` was derived, not hand-copied, by `derive.py` in this directory, which
+self-tests against `7_45_206` / `7_45_234_4ca95bb_CY` / `7_45_241` before printing this
+version's values. Feature string is closest to `7_45_234_4ca95bb_CY` (both have
+`gtkoe-roamprof-txbf-ve-*sae-dpp-sr-okc-bpd`), so all byte-signature relocation for the
+patch and `wrapper.c` entries was done `234_CY -> 265`, not from `7_45_241` which is a
+different (minimal, no-gtkoe) build lineage despite the numerically closer version.
+
+See `REVERSE_ENGINEERING_NOTES.md`, section "bcm43455c0 / 7.45.265 port", for the full
+derivation trail, confidence levels, and the wrapper-audit results.
