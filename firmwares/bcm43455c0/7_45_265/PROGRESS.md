@@ -100,12 +100,49 @@ before every stage. `wlan1` is `nmcli`-unmanaged so NetworkManager never grabs i
     hardware-confirmed.
 
 All four Stage 5 sub-steps (5a/5b/5c/5d) pass on the final clean build. Monitor mode
-and frame injection both work; only Stage 6 (wlc_monitor_amsdu_patch, low-value/
-optional) remains.
+and frame injection both work.
+
+- [DONE] Stage 6 — `wlc_monitor_amsdu_patch`. **This turned out not to be optional.**
+  A channel-hopping stress test crashed the firmware (`brcmf_fw_crashed`, trap type 0x1,
+  `lr` traced into `hnd_pkt_dup_hook` via the confirmed `memcpy` relocation) - the exact
+  bug this patch exists to route around, on ordinary A-MSDU-aggregated traffic. Found the
+  address by tracing forward from the chip-constant ROM call target (`0x25AE8`, the
+  flashpatch redirect thunk) rather than by byte signature: `0x1B3E6A` (patch site,
+  `bl 0x25ae8`) → `0x1B3E86` (skip target), byte-identical surrounding code and landing
+  instruction to 206's `0x1B2A46`→`0x1B2A62`. Rebuilt, wrapper audit re-run clean,
+  redeployed, and the crash never recurred across 56 subsequent channel hops + a
+  14,222-frame sustained capture. See `REVERSE_ENGINEERING_NOTES.md`.
+- [DONE] DKMS-free build verified. The loaded driver was actually a pre-installed
+  third-party `brcmfmac-nexmon-dkms` package, not this repo's - confirmed via build-id
+  mismatch. Built `patches/driver/brcmfmac_6.18.y-nexmon` on the Pi via plain kbuild
+  (`ARCH=arm64 make -C /lib/modules/$(uname -r)/build M=<dir>`, no DKMS), confirmed
+  build-id match after loading it, then re-ran the full ioctl/monitor/injection suite
+  against *this repo's own* driver - all pass. Made it the `modprobe`-resolved module by
+  replacing the file at `/lib/modules/<kver>/updates/dkms/brcmfmac.ko.xz` (the path
+  `depmod`'s search order actually prefers) and running `depmod -a`; verified via
+  `rmmod`+`modprobe` (not just `insmod`) that the boot-time load path picks it up.
+- [DONE] Channel hopping. 56 hops (8 cycles × 7 channels, 1/6/11/36/40/44/48) with a live
+  capture and an ioctl-liveness check after every hop: 0 failures, 0 crashes,
+  3667 frames total, after the A-MSDU fix above. (149/153/157/161 correctly rejected by
+  the kernel's regulatory domain - NL/DFS-ETSI doesn't clear them without a DFS CAC scan;
+  confirmed via `iw reg get`, not a driver/firmware issue.)
+- [DONE] RX FIFO overflow. Sustained 45s single-channel capture, no hopping: 14,222
+  frames, 0 dropped by kernel, 0 dmesg errors. No `bcm43430a1`-style `macintstatus`/MI_RXOV
+  spin wedge at any point in this session, including before the A-MSDU fix (that crash
+  was a different, unrelated bug - see above).
+- [DONE] Flash patching. 255 entries applied with zero errors in `flashpatches.log`
+  (all individual `dd` copies clean); implicitly proven live by the whole port working.
+- [DONE] Ucode compression. Build produces `gen/ucode_compressed.bin` (53160 → 26711
+  bytes, real ~50% reduction) and a 2231-line generated `ucode_compressed.c`; the PHY
+  visibly working (correct rates/channels/RSSI across thousands of captured frames) is
+  the on-chip decompression proof.
+
+**Full checklist (monitor mode, radiotap, injection, flash patching, ucode compression,
+DKMS-free build, channel hopping, RX-FIFO-overflow) is now green.**
 - [TODO] Stage 6 — `wlc_monitor_amsdu_patch` address (optional, only after 5c/5d pass).
 
-Next concrete action: Stage 6 (optional, low-value) or call it done - core port is
-fully working and hardware-verified.
+Port complete: full checklist green, hardware-verified, DKMS-free, channel hopping and
+RX-FIFO-overflow both explicitly stress-tested clean.
 
 Plan file: `/home/jayofelony/.claude/plans/i-need-you-to-bubbly-bonbon.md` (all address
 tables, confidence levels, and verification commands live there — this file only tracks

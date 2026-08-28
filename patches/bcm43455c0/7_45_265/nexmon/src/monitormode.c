@@ -185,9 +185,13 @@ __attribute__((at(0x25AF2, "flashpatch", CHIP_VER_BCM43455c0, FW_VER_ALL)))
 BLPatch(hnd_pkt_dup_hook, hnd_pkt_dup_hook);
 
 //Temporary fix to ignore A-MSDU frames
-// TODO(Stage 6): address not yet relocated for 7.45.265 - signature search from
-// both 206 (0x1B2A46) and 189 (0x1B6B02) returns zero hits (relative-branch body).
-// Left disabled rather than shipped wrong, since a bad BPatch here is a firmware
-// trap while mishandled A-MSDU frames merely look wrong. See REVERSE_ENGINEERING_NOTES.md.
-//__attribute__((at(0x000000, "", CHIP_VER_BCM43455c0, FW_VER_7_45_265)))
-//BPatch(wlc_monitor_amsdu_patch, 0x000000);
+// Found by tracing forward from the call site to the ROM flashpatch target
+// (0x25ae8, chip-constant - identical in 206 and 265) rather than by byte
+// signature (which fails here, same as 206/189, due to the relative BL/B
+// encodings inside this block). The surrounding instruction sequence is
+// byte-identical to 206's in relative layout, and the landing address lands
+// on an identical instruction encoding to 206's landing point - see
+// REVERSE_ENGINEERING_NOTES.md for the derivation and why this patch turned
+// out to be load-bearing for stability, not just A-MSDU frame handling.
+__attribute__((at(0x1B3E6A, "", CHIP_VER_BCM43455c0, FW_VER_7_45_265)))
+BPatch(wlc_monitor_amsdu_patch, 0x1B3E86);

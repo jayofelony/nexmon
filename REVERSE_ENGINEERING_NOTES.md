@@ -2410,3 +2410,147 @@ suppression) is the one remaining gap - its address could not be relocated from 
 206 or 189 (relative-branch body, zero signature hits at any length) and is shipped
 disabled rather than guessed; see the `TODO(Stage 6)` comment in `monitormode.c`. It only
 affects A-MSDU frame handling in monitor mode, not RX/injection generally.
+
+## bcm43455c0 / 7.45.265 — DKMS-free driver, and the A-MSDU crash that looked like a channel-hopping bug
+
+Follow-up session (2026-08-28) checking four things explicitly asked for: the nexmon
+firmware buildable without DKMS, and that channel hopping and RX-FIFO-overflow - both
+real problems on the `bcm43430a1` port - are not present here.
+
+### The loaded driver was a third-party DKMS package, not this repo's - always check build-id
+
+Monitor mode and injection had worked perfectly in the previous session, but that was
+riding entirely on a pre-installed `brcmfmac-nexmon-dkms` package (`dkms status` showed
+`brcmfmac-nexmon/6.18.39+ndevfix1 ... installed`) - nothing from `patches/driver/` in
+this repo had actually been built or loaded yet. Easy to miss, since the symptom (monitor
+mode/injection working) looks identical either way.
+
+**How to tell them apart**: `sudo cat /sys/module/brcmfmac/notes/.note.gnu.build-id | xxd`
+against `readelf -n <your-built.ko>` - the GNU build-id is a content hash, so an exact
+match is a hard guarantee the loaded module is byte-for-byte your build, not just
+"probably the same source." `modinfo` wasn't installed on this Pi OS image, so this
+xxd-vs-readelf comparison is the fallback.
+
+**Building it (no DKMS)**: the driver tree at `patches/driver/brcmfmac_<KERNEL>.y-nexmon`
+is a complete, ordinary out-of-tree kernel module - it builds directly against the
+running kernel's headers:
+
+    ARCH=arm64 make -C /lib/modules/$(uname -r)/build M=$(pwd) -j4
+
+on the Pi itself (native aarch64, needs `linux-headers-<version>` installed - already
+present here). No cross-compiler, no nexmon gcc plugin, no DKMS wrapper - that machinery
+is only for the *firmware* half (`patches/<chip>/<fwver>/nexmon`'s `RAM_FILE` target),
+never the driver. It built clean on the first attempt against this repo's existing
+`patches/driver/brcmfmac_6.18.y-nexmon` source.
+
+**Making it load automatically (persistence without DKMS)**: `depmod`'s module search
+order prefers `/lib/modules/<kver>/updates/dkms/` over `/lib/modules/<kver>/kernel/...`,
+so `modprobe brcmfmac` was resolving to the DKMS copy specifically, not just "a"
+brcmfmac. Backed up that file, replaced it with an `xz`-compressed copy of the freshly
+built `.ko` at the exact same path, ran `depmod -a`, then proved persistence isn't just
+theoretical by `rmmod`ing and re-`modprobe`-ing (the same command a boot-time
+`systemd-udevd` triggers) and re-checking the build-id - it resolved to the new file
+correctly. A real reboot wasn't done (that's the one thing this doesn't prove), but the
+mechanism (`depmod`-registered path + module search order) is exactly what a reboot
+relies on too. **Caveat worth remembering**: if `dkms`/`apt` ever rebuild the DKMS
+package again (e.g. on a kernel upgrade), its postinst hook will overwrite this file back
+to the original - this is a one-time proof of DKMS-independence, not a permanent
+uninstall of the DKMS package.
+
+### A firmware crash that looked exactly like a channel-hopping bug, and wasn't one
+
+First channel-hop test (cycling 2.4GHz/5GHz channels while capturing) crashed the
+firmware within two hops:
+
+    ieee80211 phy: brcmf_fw_crashed: Firmware has halted or crashed
+    ...
+    brcmfmac: dongle trap info: type 0x1 @ epc 0x002280b8
+    lr 0x00228f65 ...
+
+**The trap PC is not where the bug is - it's downstream data corruption.** Disassembling
+around `epc 0x2280b8` showed a mechanical, repeating `ldrh/movs/movs/movs` pattern with
+no coherent control flow - the classic tell (see the byte-signature section earlier in
+this file) that execution landed in data, not code. Trap type `0x1` is exactly what an
+illegal-instruction/PC-into-garbage fault looks like on this core.
+
+**`lr` is what actually matters here.** `0x228f65 & ~1 = 0x228f64` (the low bit is the
+Thumb-mode marker on a `bl` return address, not part of the address) is the instruction
+immediately after a `bl 0x19a0f8` - the *already independently-confirmed* `memcpy`
+relocation from the previous session. Disassembling the function containing that call
+showed it was `hnd_pkt_dup_hook` from `monitormode.c`, matched instruction-for-instruction
+against the C source (`lb_alloc(p->len + sizeof(radiotap_hdr), 0)`, then
+`memcpy(pnew->data, p->data, p->len)`, then `osh->pktalloced++`) - i.e. a real,
+correctly-compiled function, not a stub. The crash is consistent with `memcpy` being
+handed a corrupt/huge `p->len` for some A-MSDU sub-frame and smashing adjacent memory
+(most likely the stack, given the eventual PC-into-garbage symptom on an unrelated later
+return).
+
+**This is exactly the bug `wlc_monitor_amsdu_patch` exists to route around** - the
+"Temporary fix to ignore A-MSDU frames" comment inherited from 206/189's source, whose
+address for 7.45.265 hadn't been relocated (byte-signature search returns nothing, same
+as for 206→265, because the block contains relative branches - see the earlier session's
+note on this in the same file). It had been left disabled and commented out as
+seemingly-low-risk ("only affects A-MSDU handling"). **It is not low-risk** - it is what
+stands between ordinary A-MSDU-aggregated traffic (common on any modern 5GHz/VHT
+network) and a firmware crash, and it just happens to look like a channel-hopping bug
+because different channels expose different traffic mixes, not because hopping itself is
+implicated.
+
+**Found by tracing forward from the ROM side, not by re-trying byte signatures.** The
+flashpatch redirect target for `hnd_pkt_dup_hook` (`0x25AF2`) is a ROM address and
+therefore chip-constant - identical across every firmware version of this stepping. Its
+*caller* (inside `wlc_monitor_amsdu`, in RAM) actually calls a small ROM thunk near it
+(`0x25AE8` in this chip, also chip-constant), so grepping the *265* RAM disassembly for
+`bl 0x25ae8` finds the call site directly, no signature matching needed:
+
+    206:  0x1b2a46: bl 0x25ae8   (patch site)   ->  0x1b2a62 (skip target), delta 0x1C
+    265:  0x1b3e6a: bl 0x25ae8   (patch site)   ->  0x1b3e86 (skip target), delta 0x1C
+
+The surrounding ~40 bytes of code are byte-identical in relative layout between the two
+versions, and the landing instruction at the skip target (`8a33  ldrh r3,[r6,#16]`) is
+*literally* the same encoding in both - about as strong a confirmation as this kind of
+relocation gets. Fixed:
+`__attribute__((at(0x1B3E6A, ...))) BPatch(wlc_monitor_amsdu_patch, 0x1B3E86);`
+
+**General technique worth keeping**: when byte-signature relocation fails because a
+block contains relative branches, and the block's job is "call some chip-constant ROM
+address," search the *target* firmware's disassembly for calls to that ROM address
+directly - it sidesteps the relative-branch problem entirely, since the ROM address
+being called doesn't move.
+
+### Channel hopping and RX-FIFO-overflow: neither reproduced, once the actual bug was fixed
+
+After the A-MSDU fix: 56 channel hops (8 full cycles across `1 6 11 36 40 44 48`,
+`iw ... set channel` + a live capture + an ioctl-liveness check after every single hop)
+completed with **zero failures and zero crashes** - `TOTAL_FRAMES=3667 FAILED_HOPS=0`. A
+separate sustained 45-second capture on the busiest channel (40) with no hopping
+delivered **14,222 frames, 0 dropped by kernel, 0 dmesg errors** - a volume more than two
+orders of magnitude past the "~40 frames" invariant that reliably wedged `bcm43430a1`
+(see the extensive investigation earlier in this file). Neither the driver-level
+`macintstatus`-spin wedge nor any RX-FIFO-overflow symptom appeared under either test.
+Whether that's because this chip's D11 core doesn't share `bcm43430a1`'s buffer-pool
+exhaustion bug, or because this port's RX/monitor path just doesn't hit whatever
+triggered it there, wasn't determined - not needed, since nothing wedged.
+
+**One more false alarm worth flagging for next time**: attempting to hop to channels
+149/153/157/161 during testing failed with `kernel reports: (extension) channel is
+disabled` / `command failed: Invalid argument (-22)`. This looked like it could be
+another hopping bug, but `iw reg get` showed the regulatory domain is `NL` (DFS-ETSI),
+which doesn't clear those channels for this device without a DFS CAC scan first - the
+rejection happens in the kernel's `cfg80211` layer, before the command ever reaches the
+firmware. **Always check `iw reg get` before treating an "unavailable channel" as a
+driver or firmware bug** - regulatory-domain restrictions and real hopping wedges produce
+superficially similar "can't get onto this channel" symptoms but are completely
+different layers.
+
+### Auto-recovery is real and worth trusting
+
+Before the A-MSDU fix was found, the very first crash auto-recovered on its own: the
+driver detected the halted firmware, ran its own SDIO `mmc_hw_reset` sequence (5 attempts,
+all individually reported "failed" in dmesg, which reads alarmingly but is normal - the
+resets are what re-triggers card re-enumeration), and the card came back
+(`mmc1: card 0001 removed` -> `new high speed SDIO card` -> firmware re-attached with the
+correct patched version string) with **no `rmmod`/`modprobe` needed, and no physical power
+cycle** - a meaningfully better failure mode than `bcm43430a1`'s SDIO wedges, which
+sometimes needed exactly that. Don't assume a crash means the session is over; check
+`ip -br link` and retry a liveness ioctl before reaching for recovery escalation.
