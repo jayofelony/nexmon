@@ -4177,24 +4177,11 @@ int brcmf_sdio_get_fwname(struct device *dev, const char *ext, u8 *fw_name,
 	return 0;
 }
 
-/* A card that just crashed the dongle firmware is often not ready to
- * re-enumerate on the very first mmc_hw_reset() call (seen in the wild as
- * "bad CIS tuple" / "error -22 whilst initialising SDIO card" / "Failed to
- * initialize a non-removable card" right after the reset). The MMC core
- * only redrives this SDIO driver's .probe() if the reset actually finds a
- * card, so a single failed attempt here previously left the bus down
- * forever with no wlan0/wlan0mon and nothing left to retry it. Retry a
- * few times with a short settle delay before giving up.
- */
-#define BRCMF_SDIO_RESET_RETRIES	5
-#define BRCMF_SDIO_RESET_RETRY_DELAY_MS	500
-
 static int brcmf_sdio_bus_reset(struct device *dev)
 {
 	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
 	struct brcmf_sdio_dev *sdiodev = bus_if->bus_priv.sdio;
 	int ret;
-	int i;
 
 	brcmf_dbg(SDIO, "Enter\n");
 
@@ -4203,23 +4190,24 @@ static int brcmf_sdio_bus_reset(struct device *dev)
 
 	brcmf_sdiod_remove(sdiodev);
 
-	/* reset the adapter, retrying since the card may not be ready to
-	 * re-enumerate immediately after a firmware crash
+	/* Deliberately a single attempt. An earlier version retried
+	 * mmc_hw_reset() five times with a settle delay, on the theory that a
+	 * card which just crashed the dongle firmware needs a few goes to
+	 * re-enumerate. In practice that turned SDIO-wedge recovery into a Pi
+	 * boot loop: each failed reset leaves the bus down, the card never
+	 * comes back, and the retries only widen the window in which that
+	 * happens. Recovery from a wedged backplane is a full reboot, handled
+	 * in userspace (see pwnlib's reload_brcm / should_reboot_for_brcm_wedge
+	 * and the fix_services plugin, which share a reboot budget); the driver
+	 * should report the failure and let that policy run, not keep
+	 * hammering the card here.
 	 */
 	sdio_claim_host(sdiodev->func1);
-	for (i = 0; i < BRCMF_SDIO_RESET_RETRIES; i++) {
-		ret = mmc_hw_reset(sdiodev->func1->card);
-		if (!ret)
-			break;
-		brcmf_err("mmc_hw_reset attempt %d/%d failed: %d\n",
-			  i + 1, BRCMF_SDIO_RESET_RETRIES, ret);
-		msleep(BRCMF_SDIO_RESET_RETRY_DELAY_MS);
-	}
+	ret = mmc_hw_reset(sdiodev->func1->card);
 	sdio_release_host(sdiodev->func1);
 
 	if (ret)
-		brcmf_err("giving up on SDIO card reset after %d attempts, bus stays down\n",
-			  BRCMF_SDIO_RESET_RETRIES);
+		brcmf_err("SDIO card reset failed: %d, bus stays down\n", ret);
 
 	brcmf_bus_change_state(sdiodev->bus_if, BRCMF_BUS_DOWN);
 	return ret;
