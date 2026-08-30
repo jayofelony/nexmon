@@ -1,4 +1,4 @@
-Reference firmware, not yet patch-ready.
+Reference firmware for the in-progress 9.88.4.77 port.
 
 - Source: `RPi-Distro/firmware-nonfree`, `debian/added-firmware/brcm/brcmfmac43436-sdio.bin`
 - Internal chip string: `43436b0-roml/...`
@@ -6,6 +6,10 @@ Reference firmware, not yet patch-ready.
 - Date: Thu 2022-03-31 17:25:16 CST
 - Fetched: 2026-08-20
 
-Newer than the `9_88_4_65` version already patched in this repo. No
-`definitions.mk`/`structs.h`/patch code exists for this build yet - see the
-existing `9_88_4_65` directory for what a full port would need to produce.
+Offline scaffold in place (`definitions.mk` via `derive.py`, `structs.h`,
+`Makefile`, and the `patches/bcm43436b0/9_88_4_77/` trees). NOT hardware
+verified. See `patches/bcm43436b0/9_88_4_77/PORTING_STATUS.md` for exactly
+what is derived, its confidence, and what still needs the device.
+
+`rom.bin` is not committed - dump it from the chip with `rom_extraction`
+(chip-constant, so a 9_88_4_65 dump works too).
