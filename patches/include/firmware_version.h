@@ -55,6 +55,10 @@
 #define CHIP_VER_BCM43436b0               107
 #define CHIP_VER_BCM4389c1                108
 #define CHIP_VER_BCM43439a0               109
+// bcm43456 is the "43455c5" stepping of the 43455 die (Raspberry Pi 400 / CM4).
+// It needs its own CHIP_VER despite sharing BRCM_CC_4345_CHIP_ID with 43455:
+// the ROM differs, so no CHIP_VER_BCM43455c0 address is valid for it.
+#define CHIP_VER_BCM43456                 110
 #define CHIP_VER_BCM4398d0               1001
 #define CHIP_VER_BCM6715b0               1002
 #define CHIP_VER_BCM43684b0              1003
@@ -111,6 +115,9 @@
 #define FW_VER_7_45_241                    113
 #define FW_VER_7_45_234_4ca95bb_CY         114
 #define FW_VER_7_45_265                    115
+
+// for CHIP_VER_BCM43456
+#define FW_VER_7_84_17_1                   120
 
 // for CHIP_VER_BCM43909b0
 #define FW_VER_7_15_168_108                210
