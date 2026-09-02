@@ -46,7 +46,11 @@
 #include <sendframe.h>          // sendframe functionality
 #include <argprintf.h>
 
-int 
+/* Injection accounting counters, defined in injection.c. */
+extern unsigned int nex_inject_calls;
+extern unsigned int nex_inject_sent;
+
+int
 wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
 {
     argprintf_init(arg, len);
@@ -94,13 +98,40 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
             }
             break;
 
-        case 604: // dump live D11 core registers: maccontrol, maccommand, macintstatus, macintmask (16 bytes)
-            if (len >= 16) {
+        case 604: // dump live D11 core registers, but only when the core is powered
+            /* Reading wlc->regs reaches the d11 core across the backplane. That
+             * is only safe while the core is out of reset and clocked: issue it
+             * against an idle radio and the backplane access hangs, taking the
+             * whole chip with it. Measured on hardware - a single 604 against a
+             * freshly booted chip with wlan0 up but the radio never enabled:
+             *
+             *   [90.210547] calling brcmf_fil_cmd_data_get, cmd: 604
+             *   [90.220244] brcmfmac: brcmf_sdio_isr: failed backplane access
+             *
+             * Ten milliseconds, no traffic, no injection, no hopping. From then
+             * on every ioctl times out, F1 reads 0xffffffff instead of
+             * 0x1541a9a6, brcmf_chip_recognition rejects the chip, and a
+             * modprobe cycle cannot bring it back - only a power cycle can.
+             * That is the same terminal signature this file has been attributing
+             * to the hop/RX wedge, which makes an unguarded 604 in a sampling
+             * loop indistinguishable from the bug it was added to measure.
+             *
+             * wlc->hw->up is the same predicate sendframe() already gates on.
+             * Layout changed to carry the NEX3 magic word and that predicate, so
+             * "the core was down so we did not look" is distinguishable from
+             * "the registers really read zero" and from a timed-out reply.
+             */
+            if (len >= 24) {
                 unsigned int *out = (unsigned int *) arg;
-                out[0] = wlc->regs->maccontrol;
-                out[1] = wlc->regs->maccommand;
-                out[2] = wlc->regs->macintstatus;
-                out[3] = wlc->regs->macintmask;
+                out[0] = 0x4E455833; /* "NEX3" - sample is valid */
+                out[1] = wlc->hw->up;
+                out[2] = out[3] = out[4] = out[5] = 0;
+                if (wlc->hw->up) {
+                    out[2] = wlc->regs->maccontrol;
+                    out[3] = wlc->regs->maccommand;
+                    out[4] = wlc->regs->macintstatus;
+                    out[5] = wlc->regs->macintmask;
+                }
                 ret = IOCTL_SUCCESS;
             }
             break;
@@ -346,6 +377,28 @@ wlc_ioctl_hook(struct wlc_info *wlc, int cmd, char *arg, int len, void *wlc_if)
 
                 out[6] = ((volatile unsigned int *) mfail_addr)[0];
                 out[7] = ((volatile unsigned int *) lbfail_addr)[0];
+                ret = IOCTL_SUCCESS;
+            }
+            break;
+
+        case 620: // injection accounting: hook entries vs frames handed to sendframe
+            /* calls=0 after injecting means the frames never reached
+             * wl_send_hook, so the fault is between the BCDC/SDIO receive path
+             * and the hooked pointer at 0x40fe0. calls climbing in step with
+             * what was offered means they reach sendframe() and are lost at or
+             * below wlc_txfifo. See the comment in injection.c for the hardware
+             * measurement that makes this the open question.
+             *
+             * Writes the magic word first, per the rule this file earned the
+             * hard way: an ioctl that can time out must be able to prove it
+             * ran, or a wedged chip's zeroed reply gets read as data.
+             */
+            if (len >= 16) {
+                unsigned int *out = (unsigned int *) arg;
+                out[0] = 0x4E455832; /* "NEX2" - sample is valid */
+                out[1] = nex_inject_calls;
+                out[2] = nex_inject_sent;
+                out[3] = 0;
                 ret = IOCTL_SUCCESS;
             }
             break;

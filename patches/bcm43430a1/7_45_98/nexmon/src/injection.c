@@ -44,6 +44,38 @@
 #include "d11.h"
 #include "brcm.h"
 
+/* Injection accounting, read out by ioctl 620.
+ *
+ * nex_inject_calls counts entries to wl_send_hook with a frame that looks like
+ * an injection; nex_inject_sent counts frames actually handed to sendframe().
+ * They exist to settle a question hardware measurement could not answer from
+ * the host side: whether injected frames reach the firmware at all.
+ *
+ * Measured on this chip (wlan0 down so the monitor vif owns the channel, tuned
+ * and verified on channel 6, 1290 ambient frames captured in the same run):
+ * 30 broadcast probe requests injected on wlan0mon at 1Mbit produced zero
+ * probe responses addressed to the fabricated source MAC, and zero frames of
+ * any kind addressed to it. Repeated at 1, 2 and 11Mbit - 90 frames, zero
+ * responses. The host stack accepted every one (sent=N failed=0), and the
+ * driver does deliver them: brcmf_netdev_ops_mon has
+ * .ndo_start_xmit = brcmf_netdev_start_xmit, which passes anything longer than
+ * an ethernet header down to brcmf_proto_tx_queue_data.
+ *
+ * So the frames leave the host and produce no observable effect on the air.
+ * These counters split the two remaining possibilities: if nex_inject_calls
+ * stays at 0 the frames never reach wl_send_hook and the fault is between the
+ * BCDC/SDIO path and the hooked function pointer at 0x40fe0; if it climbs in
+ * step with what was offered, the frames reach sendframe() and are lost at or
+ * below wlc_txfifo.
+ *
+ * Note also what this does to an earlier reading: a 600-frame injection soak
+ * moved heap by 364 bytes and freebufs not at all, which looked like healthy
+ * TX reclaim. If nothing was transmitted, flat counters mean nothing was ever
+ * consumed, and that run says nothing either way about reclaim.
+ */
+unsigned int nex_inject_calls = 0;
+unsigned int nex_inject_sent = 0;
+
 int
 inject_frame(struct wl_info *wl, sk_buff *p) {
     int rtap_len = 0;
@@ -84,6 +116,7 @@ inject_frame(struct wl_info *wl, sk_buff *p) {
     skb_pull(p, rtap_len);
 
     //inject frame without using the queue
+    nex_inject_sent++;
     sendframe(wlc, p, 1, data_rate);
 
     return 0;
@@ -96,6 +129,7 @@ wl_send_hook(struct hndrte_dev *src, struct hndrte_dev *dev, struct sk_buff *p)
     struct wlc_info *wlc = wl->wlc;
 
     if (wlc->monitor && p != 0 && p->data != 0 && ((short *) p->data)[0] == 0) {
+        nex_inject_calls++;
         return inject_frame(wl, p);
     } else {
         return wl_send(src, dev, p);
