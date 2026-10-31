@@ -279,6 +279,7 @@ AT(CHIP_VER_BCM43438, FW_VER_7_45_41_26_r640327, 0x2360)
 AT(CHIP_VER_BCM43430a1, FW_VER_ALL, 0x880B80)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x2390)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x24ec)      // relocated from FW_VER_7_45_41_46 (0x2390) by byte-signature match (48B, unique hit); corroborated - the 7.45.98 RAM RX routine itself calls 0x24ec. Without this, 7_45_98 fell through to the FW_VER_ALL entry 0x880B80, which is NOT memcpy on this chip (a 5-instruction stub that loads one word and returns), so every memcpy silently did nothing
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_96_s1, 0x24fc)      // relocated from FW_VER_7_45_98 (0x24ec) - not byte-signature matched (body contains relative branches); corroborated by two independent call sites within 96.s1 itself: both the RX dispatcher (0xe244) and the RAM wl_monitor copy (0xb43c) call this same address for a data-copy operation, same corroboration method 98 used
 AT(CHIP_VER_BCM4330, FW_VER_ALL, 0x809344)
 AT(CHIP_VER_BCM4335b0, FW_VER_ALL, 0x12D20)
 AT(CHIP_VER_BCM43596a0, FW_VER_ALL, 0x1d2c)
@@ -395,6 +396,7 @@ AT(CHIP_VER_BCM43438, FW_VER_7_45_41_26_r640327, 0x625C)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_26_r640327, 0x625C)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x6348)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x6c30)      // relocated from FW_VER_7_45_41_46 (0x6348): byte-signature match fails here because the body contains a relative BL, so verified by disassembly instead - instruction-for-instruction identical, same ROM callee 0x808744
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_96_s1, 0x7124)      // relocated from FW_VER_7_45_98 (0x6c30) - verified via disassembly: single call to the same stable ROM callee 0x808744 that both 41.46 and 98 call (chip-constant ROM address)
 AT(CHIP_VER_BCM4330, FW_VER_ALL, 0x80E358)
 AT(CHIP_VER_BCM4335b0, FW_VER_ALL, 0x18B04)
 AT(CHIP_VER_BCM43596a0, FW_VER_ALL, 0x6054)
@@ -423,6 +425,7 @@ AT(CHIP_VER_BCM43438, FW_VER_7_45_41_26_r640327, 0x62A0)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_26_r640327, 0x62A0)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x638C)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x6c74)      // relocated from FW_VER_7_45_41_46 (0x638C) by byte-signature match (32B prologue, unique hit)
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_96_s1, 0x7168)      // relocated from FW_VER_7_45_98 (0x6c74) - MODERATE confidence only: found immediately after pkt_buf_get_skb (0x7124) with plausible "free" shape (conditional notify callback, reference-count decrement, tail-call to a ROM release routine), but NOT independently cross-validated via a stable ROM-callee anchor the way pkt_buf_get_skb was - verify before trusting on hardware
 AT(CHIP_VER_BCM4330, FW_VER_ALL, 0x80E300)
 AT(CHIP_VER_BCM4335b0, FW_VER_ALL, 0x18A98)
 AT(CHIP_VER_BCM43596a0, FW_VER_ALL, 0x5FE8)
@@ -753,6 +756,8 @@ AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_26_r640327, 0x1BEAC)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x1C0F8)
 // relocated from FW_VER_7_45_41_46 (0x1C0F8) by byte-signature match (32B prologue, unique hit)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x20abc)
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_96_s1, 0x29004)
+// relocated from FW_VER_7_45_98 (0x20abc) by byte-signature match (96B prologue, unique hit at every length tested)
 AT(CHIP_VER_BCM43436b0, FW_VER_9_88_4_65, 0x1B242)
 // relocated from FW_VER_9_88_4_65 (0x1B242) by 20-byte signature (unique hit,
 // prologue "d0f8 9030 d3f8 8001" matches); confirmed: radiotap TSF decodes
@@ -988,6 +993,7 @@ AT(CHIP_VER_BCM43455c0, FW_VER_7_45_189, 0x1A71BC)
 // 7.45.98's RAM wl_monitor (0xa5e2) ends in "b.w 0xa46c" with (wl, 0, p_new, 1),
 // mirroring the ROM copy at 0x819510 which tail-calls 0x880f10 the same way.
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0xa46c)
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_96_s1, 0xb0a4)      // relocated from FW_VER_7_45_98 (0xa46c) - found as the tail-branch target at the end of the RAM wl_monitor copy (0xb43c), corroborated by internal ethertype dispatch logic (checks 0x8100/VLAN and 0x0806/ARP) consistent with a packet-delivery function
 void
 wl_sendup_newdrv(void *wl, void *wlif, void *p, int numpkt)
 VOID_DUMMY
@@ -999,6 +1005,13 @@ AT(CHIP_VER_BCM43438, FW_VER_ALL, 0x819510)
 // redirects the enclosing ROM RX routine into RAM at 0xd4e4); the live copy
 // this version actually calls is the RAM one at 0xa5e2.
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0xa5e2)
+// 96.s1 (newer than 98) follows the same dead-ROM-hook pattern - its stock
+// flash-patch table also redirects ROM 0x81f410 into RAM, this time at
+// 0xe244. That RAM routine's own internal call site (0xe476) is where
+// nexmon's monitor hook goes (see monitormode.c); this entry is the RAM
+// wl_monitor copy itself (0xb43c), used for the MONITOR_IEEE80211 fallback
+// path in wl_monitor_hook.
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_96_s1, 0xb43c)
 // TODO(bcm43436b0/9_88_4_77): no entry. Only needed if monitormode.c has to
 // switch wl_monitor_radiotap's frame delivery from the chained->funcs->xmit
 // path to wl_sendup_newdrv (see the commented alt-delivery block there - it is
@@ -1579,6 +1592,8 @@ AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_26_r640327, 0x23278)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_41_46, 0x236a4)
 // relocated from FW_VER_7_45_41_46 (0x236a4) by byte-signature match (32B prologue, unique hit)
 AT(CHIP_VER_BCM43430a1, FW_VER_7_45_98, 0x29df4)
+AT(CHIP_VER_BCM43430a1, FW_VER_7_45_96_s1, 0x32964)
+// relocated from FW_VER_7_45_98 (0x29df4) by byte-signature match (32B prologue, unique hit; loses uniqueness beyond 32B, likely a relative branch further in)
 AT(CHIP_VER_BCM4330, FW_VER_ALL, 0x826F3C)
 AT(CHIP_VER_BCM43436b0, FW_VER_9_88_4_65, 0x8644)
 // relocated from FW_VER_9_88_4_65 (0x8644) by 32-byte signature (unique hit,
